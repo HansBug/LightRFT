@@ -176,7 +176,7 @@ torchrun \
     --engine_mem_util 0.6 \
     --engine_tp_size $ENGINE_TP \
     --enable_engine_sleep \
-    --system_prompt 'A conversation between the User and Assistant. The User asks a math question, and the Assistant solves it step by step. The Assistant first reasons through each step carefully, then gives the final answer. The reasoning process should be enclosed within <think></think>, followed by the final answer in \\boxed{}, like this: <think> step-by-step reasoning here </think> The answer is \\boxed{answer}.' \
+    --system_prompt 'A conversation between the User and Assistant. The User asks a math question, and the Assistant solves it step by step. Each step MUST begin with "Step N:" (e.g. "Step 1:", "Step 2:") on its own line. After all steps, the final answer MUST be on its own line prefixed with "†Answer:" (e.g. "†Answer: 42"). Example format: Step 1: ... Step 2: ... †Answer: .... This structured format is required for the process reward model to score each step.' \
     --l2 1.0e-2 \
     --adam_offload \
     --use_wandb "${WANDB_API_KEY}" \
@@ -194,15 +194,15 @@ torchrun \
 #     "label"  : one of "math_prm", "math_prm_combined", "math_rule"          #
 #   Optionally include "reference" / "chosen" for rule-based components.      #
 #                                                                              #
-#   The response format expected during training (enforce via system_prompt):  #
-#     <think>                                                                  #
-#     Step 1: ...                                                              #
+#   The response format enforced by the system_prompt above:                  #
+#     Step 1: <reasoning>                                                      #
+#     Step 2: <reasoning>                                                      #
+#     ...                                                                      #
+#     †Answer: <final answer>                                                  #
 #                                                                              #
-#     Step 2: ...                                                              #
-#     </think>                                                                 #
-#     \boxed{answer}                                                           #
-#                                                                              #
-#   URSA-8B-RM treats blank lines (\n\n) as step boundaries.                  #
+#   URSA-8B-RM identifies step boundaries by scanning for "Step N" headings   #
+#   and inserts the Cyrillic marker ' и' (U+0438) at the end of each step.   #
+#   If responses do not follow this format, the PRM returns 0.0 reward.       #
 #                                                                              #
 # Step 2: Configure Part 1 above                                               #
 #   - PATH_TO_YOUR_BASE_MODEL : actor checkpoint                               #
@@ -217,9 +217,9 @@ torchrun \
 #   - Set label = "math_prm_combined" for PRM + rule-based accuracy.          #
 #   - Adjust MathPRMReward aggregation in reward_models_utils.py:             #
 #       "min"     – most conservative (default, recommended)                  #
-#       "mean"    – softer, less sensitive to a single bad step               #
+#       "avg"     – softer, less sensitive to a single bad step               #
 #       "last"    – only the final step score (close to ORM behaviour)         #
-#   - Adjust step_separator in reward_models_utils.py if your data uses       #
-#     a different step format (e.g. "Step N:" headers).                       #
+#   - The step format MUST be "Step N: ...\n†Answer: ..." for URSA-8B-RM.   #
+#     The system_prompt above enforces this. Do NOT change it to \n\n format. #
 #                                                                              #
 ################################################################################

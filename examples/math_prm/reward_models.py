@@ -2088,145 +2088,237 @@ def rule_reward_func(queries):
 
 
 # ============================================================================
-# Process Reward Model (PRM) - URSA-8B-RM compatible
+# Process Reward Model (PRM) - strictly following URSA-MATH inference protocol
 # ============================================================================
 
 class MathPRMReward(nn.Module):
     """
-    Process Reward Model (PRM) for mathematical reasoning steps.
+    Process Reward Model wrapping UrsaForTokenClassification (URSA-8B-RM).
 
-    Compatible with URSA-8B-RM and similar step-level math reward models
-    (e.g., Math-Shepherd PRM, Qwen-Math PRM).
+    This implementation strictly follows the inference logic in
+    ``URSA-MATH/inference/prm_infer_score.py``.  Key design decisions:
 
-    Inference protocol:
-        1. The response text is split into reasoning steps by ``step_separator``.
-        2. Each step is appended with ``step_tag`` (default ``ки``, the Cyrillic
-           digraph used by Math-Shepherd / URSA-MATH training).
-        3. A single forward pass is run on the concatenated input.
-        4. At every ``step_tag`` token position, the logits from the *preceding*
-           token are used to compute P(good_token) / (P(good_token) + P(bad_token)).
-        5. Per-step probabilities are aggregated into a single scalar reward.
+    **Model architecture**
+        ``UrsaForTokenClassification`` (NOT AutoModelForCausalLM) has a dedicated
+        ``score = nn.Linear(hidden_size, 1)`` classification head.  The model's
+        ``logits`` output has shape ``(batch, seq_len_expanded, 1)`` — one raw
+        scalar per token position — and is NOT a vocabulary distribution.
+
+    **Step tag: ' и' (space + Cyrillic и, U+0438)**
+        The step marker is the single Cyrillic letter ``и`` ("i", meaning "and" in
+        Russian), encoded with a leading space as ``' и'``.  This is tokenised to
+        a single token ID in the Qwen-family tokenizers used by URSA.
+
+        Note: this is NOT ``ки`` (two characters U+043A + U+0438).  Only the
+        single character ``и`` (U+0438) is used.
+
+        Source: ``prm_infer_score.py`` line 114::
+
+            tag_id = processor.tokenizer.encode(' и', add_special_tokens=False)
+
+    **Step marker insertion: ``replace_specific_plus_minus_with_ki``**
+        The PRM is trained on responses formatted as::
+
+            Step 1: <content>
+            Step 2: <content>
+            ...
+            †Answer: <answer>
+
+        Before feeding a response to the model, the function
+        ``replace_specific_plus_minus_with_ki`` (ported directly from URSA-MATH)
+        locates each ``Step N`` heading and inserts `` и`` right after the last
+        non-whitespace character of the preceding step.  The same is done before
+        ``†Answer:``.  The actor's system prompt MUST instruct it to use this exact
+        format.
+
+    **Score extraction**
+        After a single forward pass, the reward at each step boundary is read as::
+
+            reward_flat = model(**inputs).logits.view(-1)   # (L_expanded,)
+            step_scores = reward_flat[input_ids_aligned == tag_id]  # (n_steps,)
+            step_scores = torch.sigmoid(step_scores)
+
+        The score is taken AT the ``и`` token position (not the position before
+        it), because ``UrsaForTokenClassification`` uses a per-token classifier
+        head — the hidden state at the ``и`` position already encodes the full
+        causal context of that step.
+
+        Source: ``prm_infer_score.py`` lines 116–121::
+
+            reward = model(**inputs).logits
+            ...
+            reward = reward.view(-1)[input_ids == tag_id[0]]
+            reward = torch.sigmoid(reward).view(-1)
+
+    **Image padding (575 dummy tokens)**
+        URSA is a multi-modal model.  Even for text-only input, the chat template
+        includes a ``<|image|>`` placeholder that the vision encoder expands into
+        576 patch embeddings (adding 575 tokens).  The original ``input_ids``
+        (length L) and the expanded ``reward`` tensor (length L+575) are aligned
+        by inserting 575 dummy ``-1`` tokens after position 0 in ``input_ids``::
+
+            input_ids_aligned = cat([input_ids[:1],
+                                     full(575, -1),
+                                     input_ids[1:]])
+
+        Source: ``prm_infer_score.py`` lines 117–119.
 
     Args:
-        base_model: HuggingFace ``AutoModelForCausalLM`` instance.
-        tokenizer: Tokenizer paired with ``base_model``.
-        good_token: Token string predicting a correct step (default ``"+"``)
-        bad_token: Token string predicting an incorrect step (default ``"-"``)
-        step_tag: Tag appended after each step during inference (default ``"ки"``)
-        step_separator: Delimiter used to split the raw response into steps
-            (default ``"\\n\\n"``). Adjust to match the format of the math data.
-        aggregation: How to collapse per-step scores into a single reward.
-            Choices: ``"min"`` (most conservative), ``"mean"``, ``"last"``,
-            ``"product"``.  Default ``"min"``.
+        base_model: ``UrsaForTokenClassification`` instance loaded from the
+            URSA-8B-RM checkpoint.
+        processor: ``UrsaProcessor`` paired with ``base_model``.
+        aggregation: How to aggregate per-step scores.
+            ``"min"`` (default, most conservative) / ``"avg"`` / ``"last"``.
     """
 
-    # Default step tag (Cyrillic ки = U+043A U+0438), shared by Math-Shepherd
-    # and URSA-MATH training data format.
-    DEFAULT_STEP_TAG = "ки"
+    # System prompt used in URSA inference (from single_inference() default)
+    _SYSTEM_PROMPT = 'You are a helpful assistant.'
+
+    # PRM input prefix instructing the model to check step correctness
+    # Source: prm_infer_score.py line 29
+    _PRM_PROMPT = (
+        'You are given a problem and a step-by-step solution. '
+        'You need to check the correctness of each step.\nQuestion:'
+    )
+
+    # Number of EXTRA image-patch tokens inserted by the vision encoder when one
+    # image is processed (576 patches - 1 original placeholder = 575 extras).
+    # Source: prm_infer_score.py lines 118-119.
+    _IMAGE_PAD = 575
 
     def __init__(
         self,
         base_model: nn.Module,
-        tokenizer,
-        good_token: str = "+",
-        bad_token: str = "-",
-        step_tag: str = DEFAULT_STEP_TAG,
-        step_separator: str = "\n\n",
-        aggregation: str = "min",
+        processor,
+        aggregation: str = 'min',
     ):
         super().__init__()
         self.model = base_model
-        self.tokenizer = tokenizer
-        self.step_tag = step_tag
-        self.step_separator = step_separator
+        self.processor = processor
+        self.tokenizer = processor.tokenizer
         self.aggregation = aggregation
 
-        # Resolve good / bad token IDs.  Many tokenizers prepend a space for
-        # "word-initial" tokens, so we try with and without the leading space.
-        def _get_single_token_id(token: str) -> int:
-            for candidate in [token, f" {token}"]:
-                ids = tokenizer.encode(candidate, add_special_tokens=False)
-                if len(ids) == 1:
-                    return ids[0]
-            # Fallback: take the last sub-token of the bare string
-            ids = tokenizer.encode(token, add_special_tokens=False)
-            return ids[-1]
+        # ' и' must encode to exactly ONE token.
+        # Source: prm_infer_score.py line 114:
+        #   tag_id = processor.tokenizer.encode(' и', add_special_tokens=False)
+        tag_ids = self.tokenizer.encode(' и', add_special_tokens=False)
+        assert len(tag_ids) == 1, (
+            f"The step tag ' и' (space + Cyrillic и, U+0438) must encode to "
+            f"exactly 1 token, but got {len(tag_ids)} tokens: {tag_ids}. "
+            f"Ensure the URSA tokenizer is used."
+        )
+        self.tag_id: int = tag_ids[0]
 
-        self.good_token_id = _get_single_token_id(good_token)
-        self.bad_token_id = _get_single_token_id(bad_token)
+    # ------------------------------------------------------------------
+    # Step-marker insertion  (ported from prm_infer_score.py)
+    # ------------------------------------------------------------------
 
-        # Resolve step-tag token sequence (may be one or two tokens).
-        self._step_tag_ids: List[int] = tokenizer.encode(step_tag, add_special_tokens=False)
-        if len(self._step_tag_ids) == 1:
-            self.step_tag_id: Optional[int] = self._step_tag_ids[0]
+    @staticmethod
+    def replace_specific_plus_minus_with_ki(text: str) -> str:
+        """
+        Insert `` и`` at the end of each reasoning step and before ``†Answer:``.
+
+        Directly ported from ``URSA-MATH/inference/prm_infer_score.py``.
+
+        The function locates all ``Step N`` headings to find step boundaries,
+        then inserts the string `` и`` immediately after the last
+        non-whitespace character of each step body (i.e. just before the next
+        ``Step N`` heading or ``†Answer:``).
+
+        If any error occurs during parsing, `` и`` is appended to the entire
+        text as a fallback (preserving the original URSA behaviour).
+
+        Example::
+
+            Input:  "Step 1: 2+2=4\\nStep 2: so the answer is 4\\n†Answer: 4"
+            Output: "Step 1: 2+2=4 и\\nStep 2: so the answer is 4 и\\n†Answer: 4"
+        """
+        try:
+            import regex as _re
+        except ImportError:
+            import re as _re  # fall back to stdlib re if regex not installed
+
+        pattern = r'Step \d+'
+        matches = list(_re.finditer(pattern, text))
+        positions = [(m.start(), m.end()) for m in matches]
+
+        text_list = list(text)
+        insert_pos = []
+        try:
+            # For each step i (i >= 1), find the last non-space/newline character
+            # before the start of "Step i" and mark the position after it.
+            for i in range(1, len(positions)):
+                for j in range(positions[i][0] - 1, positions[i - 1][1], -1):
+                    if text_list[j] not in (' ', '\n'):
+                        insert_pos.append(j + 1)
+                        break
+
+            # Also mark the last non-space/newline character before "†Answer:".
+            answer_start = text.find('†Answer:')
+            for j in range(answer_start - 1, positions[-1][1], -1):
+                if text_list[j] not in (' ', '\n'):
+                    insert_pos.append(j + 1)
+                    break
+
+            # Insert ' и' at the collected positions (reverse order to preserve indices).
+            for index in sorted(insert_pos, reverse=True):
+                text = text[:index] + ' и' + text[index:]
+            return text
+        except Exception:
+            # Fallback: append ' и' to the full text
+            return text + ' и'
+
+    # ------------------------------------------------------------------
+    # Input preparation  (replicates prepare_input() from prm_infer_score.py)
+    # ------------------------------------------------------------------
+
+    def _prepare_prm_input(self, question: str, response: str) -> str:
+        """
+        Build the PRM input string and insert step markers.
+
+        Replicates ``prepare_input()`` from ``prm_infer_score.py``::
+
+            instruction = PROMPT + question + '\\n' + response
+            instruction = replace_specific_plus_minus_with_ki(instruction)
+        """
+        if not question or isinstance(question, float):
+            instruction = self._PRM_PROMPT + '\n' + response
         else:
-            # Multi-token step tag: we will search for the sub-sequence.
-            self.step_tag_id = None
+            instruction = self._PRM_PROMPT + question + '\n' + response
+        return self.replace_specific_plus_minus_with_ki(instruction)
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
+    def _split_conversation(self, prompt_and_output: str):
+        """Extract (question, response) from a decoded conversation string."""
+        question = ''
+        response = ''
 
-    def _extract_response(self, prompt_and_output: str) -> str:
-        """Return only the assistant response from a full conversation string."""
-        # Try common assistant delimiters (Qwen / ChatML / plain text)
-        for sep in [
-            "<|im_start|>assistant\n",
-            "<|start_header_id|>assistant<|end_header_id|>\n\n",  # llama3
-            "Assistant:",
-            "ASSISTANT:",
-        ]:
+        # --- Extract user question ---
+        for sep in ('<|im_start|>user\n', 'User:', 'USER:'):
             if sep in prompt_and_output:
-                return prompt_and_output.split(sep)[-1]
-        # Fallback: return the full text
-        return prompt_and_output
+                user_block = prompt_and_output.split(sep)[-1]
+                for end in ('<|im_end|>', '<|im_start|>'):
+                    if end in user_block:
+                        user_block = user_block.split(end)[0]
+                question = user_block.strip()
+                break
 
-    def _format_with_step_tags(self, response: str) -> str:
-        """Append step_tag after each reasoning step in *response*."""
-        steps = [s for s in response.split(self.step_separator) if s.strip()]
-        if not steps:
-            return response.strip() + f" {self.step_tag}"
-        return self.step_separator.join(s + f" {self.step_tag}" for s in steps)
+        # --- Extract assistant response ---
+        for sep in ('<|im_start|>assistant\n', 'Assistant:', 'ASSISTANT:'):
+            if sep in prompt_and_output:
+                resp_block = prompt_and_output.split(sep)[-1]
+                for end in ('<|im_end|>', '<|endoftext|>'):
+                    if end in resp_block:
+                        resp_block = resp_block.split(end)[0]
+                response = resp_block.strip()
+                break
 
-    def _find_step_tag_positions(self, seq: torch.Tensor) -> List[int]:
-        """Return token positions in *seq* where the step_tag ends."""
-        positions: List[int] = []
-        tag_ids = self._step_tag_ids
-        n = len(tag_ids)
-        seq_list = seq.tolist()
+        if not response:
+            response = prompt_and_output  # fallback
 
-        if n == 1:
-            # Fast path: single token
-            tid = tag_ids[0]
-            for j, tok in enumerate(seq_list):
-                if tok == tid:
-                    positions.append(j)
-        else:
-            # Sliding-window search for the sub-sequence
-            for j in range(len(seq_list) - n + 1):
-                if seq_list[j:j + n] == tag_ids:
-                    positions.append(j + n - 1)  # position of last tag token
-
-        return positions
-
-    def _aggregate(self, scores: List[float]) -> float:
-        if not scores:
-            return 0.5  # neutral fallback
-        if self.aggregation == "min":
-            return min(scores)
-        if self.aggregation == "mean":
-            return sum(scores) / len(scores)
-        if self.aggregation == "last":
-            return scores[-1]
-        if self.aggregation == "product":
-            r = 1.0
-            for s in scores:
-                r *= s
-            return r
-        raise ValueError(f"Unknown aggregation: {self.aggregation!r}")
+        return question, response
 
     # ------------------------------------------------------------------
-    # Forward
+    # Forward  (replicates single_inference() from prm_infer_score.py)
     # ------------------------------------------------------------------
 
     @torch.no_grad()
@@ -2235,71 +2327,110 @@ class MathPRMReward(nn.Module):
         sequences,
         attention_mask,
         prompt_and_output=None,
-        raw_images=None,  # ignored – text-only PRM
+        raw_images=None,  # ignored – URSA is invoked with image=None
         **kwargs,
     ) -> torch.Tensor:
         """
-        Compute per-sequence rewards using step-level PRM scoring.
+        Score each sequence using URSA-MATH's step-level PRM protocol.
+
+        This method replicates ``single_inference()`` from
+        ``URSA-MATH/inference/prm_infer_score.py`` for a batch of sequences.
+
+        The actor's responses **must** be formatted as::
+
+            Step 1: <reasoning>
+            Step 2: <reasoning>
+            ...
+            †Answer: <final answer>
+
+        The system prompt in the training script should enforce this format.
 
         Args:
-            sequences: Token IDs (B, seq_len) or None.
-            attention_mask: Attention mask (B, seq_len) or None.
-            prompt_and_output: List[str] of decoded ``prompt + response`` texts.
-                Preferred over decoding ``sequences`` because it avoids round-trip
-                tokenization artifacts.
-            raw_images: Ignored (text-only model).
+            sequences: Ignored in favour of ``prompt_and_output``.
+            attention_mask: Ignored.
+            prompt_and_output: List[str] of decoded full conversation texts.
+            raw_images: Ignored (URSA is invoked with ``image=None`` for math).
 
         Returns:
-            FloatTensor of shape (B,) with aggregated step rewards in [0, 1].
+            FloatTensor of shape ``(B,)`` with aggregated step scores in [0, 1].
         """
         device = next(self.model.parameters()).device
 
-        if prompt_and_output is None or not isinstance(prompt_and_output, (list, tuple)):
-            if sequences is not None:
-                prompt_and_output = self.tokenizer.batch_decode(
-                    sequences, skip_special_tokens=True
-                )
-            else:
-                raise ValueError("Either sequences or prompt_and_output must be provided")
+        if prompt_and_output is None and sequences is not None:
+            prompt_and_output = self.tokenizer.batch_decode(
+                sequences, skip_special_tokens=True
+            )
+        elif prompt_and_output is None:
+            raise ValueError("Either sequences or prompt_and_output must be provided")
 
         batch_rewards: List[float] = []
 
         for text in prompt_and_output:
-            response = self._extract_response(text)
-            formatted = self._format_with_step_tags(response)
+            question, response = self._split_conversation(text)
+            input_prompt = self._prepare_prm_input(question, response)
 
-            encoding = self.tokenizer(
-                formatted,
-                return_tensors="pt",
-                add_special_tokens=True,
-                truncation=True,
-                max_length=4096,
+            # Build conversation in URSA's expected ChatML format.
+            # Always include <|image|> placeholder even for text-only math;
+            # the processor handles image=None by producing a zero-value feature
+            # of the correct shape, maintaining the 576-token image expansion.
+            # Source: single_inference() in prm_infer_score.py lines 100-105.
+            conv = [
+                {"role": "system", "content": self._SYSTEM_PROMPT},
+                {"role": "user",   "content": "<|image|>" + input_prompt},
+            ]
+            formatted_prompt = self.processor.apply_chat_template(
+                conv, add_generation_prompt=True
             )
-            input_ids = encoding.input_ids.to(device)       # (1, L)
-            local_mask = encoding.attention_mask.to(device)  # (1, L)
 
-            outputs = self.model(input_ids=input_ids, attention_mask=local_mask)
-            logits = outputs.logits[0]  # (L, V)
+            inputs = self.processor(
+                formatted_prompt,
+                [None],            # image=None for text-only math problems
+                return_tensors='pt',
+            ).to(device, torch.bfloat16)
 
-            step_positions = self._find_step_tag_positions(input_ids[0])
+            # Forward pass.
+            # logits shape: (1, L_expanded, 1) where L_expanded = L_original + 575
+            # because UrsaForTokenClassification expands the <|image|> token into
+            # 576 patch embeddings.
+            # Source: prm_infer_score.py line 116: reward = model(**inputs).logits
+            reward = self.model(**inputs).logits   # (1, L_expanded, 1)
 
-            if not step_positions:
-                # No step boundaries found: score the last valid token position
-                last_pos = int(local_mask[0].nonzero()[-1].item())
-                step_positions = [last_pos]
+            # Align original input_ids with the expanded reward tensor.
+            # The vision encoder replaces the single <|image|> token with 576
+            # patch embeddings, adding 575 tokens.  We insert 575 dummy '-1'
+            # tokens after position 0 (BOS) in input_ids so that
+            # "input_ids_aligned[i] == tag_id" maps to "reward_flat[i]".
+            # Source: prm_infer_score.py lines 117-119.
+            input_ids = inputs['input_ids'].view(-1)                    # (L_original,)
+            padding = torch.full((self._IMAGE_PAD,), -1, device=device)
+            input_ids_aligned = torch.cat((input_ids[:1], padding, input_ids[1:]))
 
-            step_scores: List[float] = []
-            for pos in step_positions:
-                if pos == 0:
-                    continue
-                # Logits at [pos - 1] predict the token at position [pos].
-                # The step-tag itself is at [pos]; the distribution *before* it
-                # indicates whether the preceding step is correct.
-                pos_logits = logits[pos - 1]  # (V,)
-                good_bad = pos_logits[[self.good_token_id, self.bad_token_id]]
-                probs = torch.softmax(good_bad, dim=-1)
-                step_scores.append(float(probs[0].item()))
+            # Extract the scalar score AT each ' и' position, then apply sigmoid.
+            # We take the logit AT position pos (not pos-1) because the
+            # UrsaForTokenClassification head produces a per-token score from
+            # hidden_states[-1]; the hidden state at the ' и' token already
+            # encodes the full causal context of the preceding step.
+            # Source: prm_infer_score.py lines 120-121:
+            #   reward = reward.view(-1)[input_ids == tag_id[0]]
+            #   reward = torch.sigmoid(reward).view(-1)
+            reward_flat = reward.view(-1)                               # (L_expanded,)
+            step_logits = reward_flat[input_ids_aligned == self.tag_id] # (n_steps,)
+            step_scores = torch.sigmoid(step_logits).view(-1)
 
-            batch_rewards.append(self._aggregate(step_scores))
+            if step_scores.numel() == 0:
+                # No ' и' markers found – response was not in the expected format.
+                batch_rewards.append(0.0)
+                continue
+
+            # Aggregate step scores.
+            # Source: prm_infer_score.py lines 122-123 (return_score function).
+            if self.aggregation in ('min',):
+                batch_rewards.append(float(torch.min(step_scores).item()))
+            elif self.aggregation in ('avg', 'mean'):
+                batch_rewards.append(float(torch.mean(step_scores).item()))
+            elif self.aggregation == 'last':
+                batch_rewards.append(float(step_scores[-1].item()))
+            else:
+                raise ValueError(f"Unknown aggregation: {self.aggregation!r}")
 
         return torch.tensor(batch_rewards, dtype=torch.float32, device=device)

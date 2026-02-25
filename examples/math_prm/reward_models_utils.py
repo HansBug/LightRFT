@@ -276,8 +276,6 @@ def _load_hf_text_model(
     """
     Load a text-only HuggingFace CausalLM model and its tokenizer.
 
-    Used for text-only reward models such as URSA-8B-RM (PRM).
-
     :param pretrain_path: Model path or HuggingFace model name
     :type pretrain_path: str
     :param device: Target device (currently unused; caller moves model to device)
@@ -294,6 +292,67 @@ def _load_hf_text_model(
     tokenizer = AutoTokenizer.from_pretrained(pretrain_path)
     tokenizer.padding_side = "left"
     return base, tokenizer
+
+
+def _load_ursa_prm_model(
+    pretrain_path: str,
+    device: torch.device,
+    ursa_math_path: str = None,
+) -> Tuple[Any, Any]:
+    """
+    Load ``UrsaForTokenClassification`` and ``UrsaProcessor`` for URSA-8B-RM.
+
+    ``UrsaForTokenClassification`` is a custom multi-modal model defined in the
+    URSA-MATH repository.  It has a ``score = nn.Linear(hidden_size, 1)`` head
+    and outputs per-token scalar logits (shape ``(batch, seq_len, 1)``), NOT
+    vocabulary logits.
+
+    The path to the URSA-MATH repository is resolved in the following order:
+
+    1. The ``ursa_math_path`` argument passed to this function.
+    2. The ``URSA_MATH_PATH`` environment variable.
+    3. The hard-coded default ``/home/hansbug/sensetime-projects/URSA-MATH``.
+
+    :param pretrain_path: Path to the URSA-8B-RM checkpoint directory.
+    :type pretrain_path: str
+    :param device: Target device (unused; caller places model on device).
+    :type device: torch.device
+    :param ursa_math_path: Path to the URSA-MATH repository root.
+        If ``None``, resolved from ``URSA_MATH_PATH`` env var or the default.
+    :type ursa_math_path: str, optional
+    :return: Tuple of (UrsaForTokenClassification, UrsaProcessor)
+    :rtype: Tuple[Any, Any]
+    :raises ImportError: If the URSA-MATH model classes cannot be imported.
+    """
+    import sys
+    import os
+
+    if ursa_math_path is None:
+        ursa_math_path = os.environ.get(
+            'URSA_MATH_PATH',
+            '/home/hansbug/sensetime-projects/URSA-MATH',
+        )
+    if ursa_math_path not in sys.path:
+        sys.path.insert(0, ursa_math_path)
+
+    try:
+        from models.ursa_model import UrsaProcessor, UrsaForTokenClassification
+    except ImportError as exc:
+        raise ImportError(
+            f"Cannot import UrsaForTokenClassification / UrsaProcessor from "
+            f"'{ursa_math_path}/models/ursa_model'. "
+            f"Make sure the URSA-MATH repository is available at that path, "
+            f"or set the URSA_MATH_PATH environment variable. "
+            f"Original error: {exc}"
+        ) from exc
+
+    print(f"[_load_ursa_prm_model] Loading model from {pretrain_path}")
+    model = UrsaForTokenClassification.from_pretrained(
+        pretrain_path, torch_dtype=torch.bfloat16
+    )
+    processor = UrsaProcessor.from_pretrained(pretrain_path)
+    print(f"[_load_ursa_prm_model] Loaded URSA-8B-RM from {pretrain_path}")
+    return model, processor
 
 
 def _load_engine(
@@ -536,48 +595,58 @@ def build_math_prm(
     base: Optional[Tuple[Any, Any]] = None,
 ) -> Tuple[MathPRMReward, Any]:
     """
-    Build a Process Reward Model (PRM) for math reasoning (e.g. URSA-8B-RM).
+    Build a Process Reward Model (PRM) for math reasoning using URSA-8B-RM.
 
-    URSA-8B-RM is a text-only causal LM that scores each reasoning step.
-    It uses the Cyrillic digraph ``ки`` as a step separator during inference:
-    each step is appended with ``ки`` and the model's next-token distribution
-    at that position gives P(step_is_correct).
+    ``UrsaForTokenClassification`` (from the URSA-MATH repository) is a
+    multi-modal model with a per-token scalar classification head
+    (``score = nn.Linear(hidden_size, 1)``).  Its output logits have shape
+    ``(batch, seq_len, 1)`` — NOT vocabulary logits.
 
-    Engine mode is not supported for PRM because step-level logit extraction
-    requires direct access to the model's hidden-state outputs.
+    The PRM scores each step of a ``Step N:`` formatted reasoning chain by:
 
-    :param cfg: Reward model configuration (use_engine is ignored)
+    1. Inserting `` и`` (space + Cyrillic и, U+0438) after each step boundary
+       using ``MathPRMReward.replace_specific_plus_minus_with_ki()``.
+    2. Running a single forward pass through ``UrsaForTokenClassification``.
+    3. Extracting the scalar at each `` и`` token position and applying sigmoid.
+    4. Aggregating step scores with ``min`` (most conservative).
+
+    Engine mode is not supported because the PRM requires direct access to
+    per-token hidden-state logits from ``UrsaForTokenClassification``, which
+    are not available through an SGLang/vLLM engine interface.
+
+    The URSA-MATH repository path is resolved via the ``URSA_MATH_PATH``
+    environment variable (default: ``/home/hansbug/sensetime-projects/URSA-MATH``).
+
+    :param cfg: Reward model configuration.  ``use_engine`` is ignored.
     :type cfg: RewardModelConfig
-    :param strategy: Training strategy instance
+    :param strategy: Training strategy instance.
     :type strategy: Any
-    :param base: Optional pre-loaded (model, tokenizer) tuple for sharing.
-                 If provided, skips model loading.
+    :param base: Optional pre-loaded ``(UrsaForTokenClassification, UrsaProcessor)``
+                 tuple.  If provided, skips model loading.
     :type base: Optional[Tuple[Any, Any]]
-    :return: Tuple of (MathPRMReward, tokenizer)
+    :return: Tuple of ``(MathPRMReward, tokenizer)``
     :rtype: Tuple[MathPRMReward, Any]
     """
     if cfg.use_engine:
         strategy.print(
             "[build_math_prm] Engine mode is not supported for PRM "
-            "(requires logit access). Falling back to HF mode."
+            "(UrsaForTokenClassification requires direct logit access). "
+            "Falling back to HF mode."
         )
 
     if base is not None:
-        base_model, tokenizer = base
+        base_model, processor = base
     else:
-        base_model, tokenizer = _load_hf_text_model(cfg.path, get_current_device())
+        base_model, processor = _load_ursa_prm_model(cfg.path, get_current_device())
 
     model = MathPRMReward(
         base_model=base_model,
-        tokenizer=tokenizer,
-        good_token="+",
-        bad_token="-",
-        step_tag="ки",       # Cyrillic ки – used by Math-Shepherd / URSA-MATH
-        step_separator="\n\n",
-        aggregation="min",   # conservative: pass = worst step passes
+        processor=processor,
+        aggregation="min",   # conservative: the worst-scoring step determines the reward
     )
     model.eval()
-    return model, tokenizer
+    return model, processor.tokenizer
+
 
 # ============================================================================
 # Main Initialization Entry Point
