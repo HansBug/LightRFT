@@ -71,6 +71,7 @@ from reward_models import (
     Qwen2VLRewardModelKnowledge,
     Qwen2VLRewardModelGeneral,
     Qwen2VLRewardModelNormal,
+    MathPRMReward,
 )
 
 # ============================================================================
@@ -84,6 +85,7 @@ class RewardModelType(str, Enum):
     VALUE     = "value"
     GENERAL   = "general"
     NORMAL    = "normal"
+    MATH_PRM  = "math_prm"   # Process Reward Model for math reasoning (e.g. URSA-8B-RM)
 
 
 @dataclass
@@ -150,6 +152,9 @@ def _guess_rtype_from_path(path: str) -> RewardModelType:
     if "value"    in p or "vauai" in p: return RewardModelType.VALUE
     if "knowledge" in p or "qwen2.5-vl-72b" in p: return RewardModelType.KNOWLEDGE
     if "normal"   in p: return RewardModelType.NORMAL
+    # PRM heuristics: URSA-RM, math-shepherd, prm, step-reward, etc.
+    if any(kw in p for kw in ["ursa", "prm", "math-rm", "step-reward", "process-reward"]):
+        return RewardModelType.MATH_PRM
     return RewardModelType.GENERAL
 
 def parse_reward_pretrain(
@@ -262,6 +267,33 @@ def _load_hf_model(
     )
     processor.tokenizer.padding_side = "left"
     return base, processor
+
+
+def _load_hf_text_model(
+    pretrain_path: str,
+    device: torch.device,
+) -> Tuple[Any, Any]:
+    """
+    Load a text-only HuggingFace CausalLM model and its tokenizer.
+
+    Used for text-only reward models such as URSA-8B-RM (PRM).
+
+    :param pretrain_path: Model path or HuggingFace model name
+    :type pretrain_path: str
+    :param device: Target device (currently unused; caller moves model to device)
+    :type device: torch.device
+    :return: Tuple of (base_model, tokenizer)
+    :rtype: Tuple[AutoModelForCausalLM, AutoTokenizer]
+    """
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    base = AutoModelForCausalLM.from_pretrained(
+        pretrain_path,
+        torch_dtype=torch.bfloat16,
+        attn_implementation="flash_attention_2",
+    )
+    tokenizer = AutoTokenizer.from_pretrained(pretrain_path)
+    tokenizer.padding_side = "left"
+    return base, tokenizer
 
 
 def _load_engine(
@@ -495,6 +527,57 @@ def build_normal(
         model = Qwen2VLRewardModelNormal(base_model, proc.tokenizer, proc, text_only=strategy.args.text_only)
         model.eval()
         return model, proc.tokenizer
+
+
+@register_builder(RewardModelType.MATH_PRM)
+def build_math_prm(
+    cfg: RewardModelConfig,
+    strategy: Any,
+    base: Optional[Tuple[Any, Any]] = None,
+) -> Tuple[MathPRMReward, Any]:
+    """
+    Build a Process Reward Model (PRM) for math reasoning (e.g. URSA-8B-RM).
+
+    URSA-8B-RM is a text-only causal LM that scores each reasoning step.
+    It uses the Cyrillic digraph ``ки`` as a step separator during inference:
+    each step is appended with ``ки`` and the model's next-token distribution
+    at that position gives P(step_is_correct).
+
+    Engine mode is not supported for PRM because step-level logit extraction
+    requires direct access to the model's hidden-state outputs.
+
+    :param cfg: Reward model configuration (use_engine is ignored)
+    :type cfg: RewardModelConfig
+    :param strategy: Training strategy instance
+    :type strategy: Any
+    :param base: Optional pre-loaded (model, tokenizer) tuple for sharing.
+                 If provided, skips model loading.
+    :type base: Optional[Tuple[Any, Any]]
+    :return: Tuple of (MathPRMReward, tokenizer)
+    :rtype: Tuple[MathPRMReward, Any]
+    """
+    if cfg.use_engine:
+        strategy.print(
+            "[build_math_prm] Engine mode is not supported for PRM "
+            "(requires logit access). Falling back to HF mode."
+        )
+
+    if base is not None:
+        base_model, tokenizer = base
+    else:
+        base_model, tokenizer = _load_hf_text_model(cfg.path, get_current_device())
+
+    model = MathPRMReward(
+        base_model=base_model,
+        tokenizer=tokenizer,
+        good_token="+",
+        bad_token="-",
+        step_tag="ки",       # Cyrillic ки – used by Math-Shepherd / URSA-MATH
+        step_separator="\n\n",
+        aggregation="min",   # conservative: pass = worst step passes
+    )
+    model.eval()
+    return model, tokenizer
 
 # ============================================================================
 # Main Initialization Entry Point
@@ -804,6 +887,13 @@ RECIPE: Dict[str, List[Tuple[str, Optional[str], float]]] = {
     "geo3k_rule":      [("geo3k_rule", None,  1.0)],
     # GSM8K dataset: pure rule-based reward (no reward model needed)
     "gsm8k_rule":      [("gsm8k_rule", None,  1.0)],
+    # Math PRM: step-level reward from URSA-8B-RM (or compatible PRM)
+    # The PRM alone is usually sufficient; add a light format bonus if desired.
+    "math_prm":        [("model", "math_prm", 1.0)],
+    # Math PRM + rule-based accuracy (format reward comes for free from mix_rewards)
+    "math_prm_combined": [("model", "math_prm", 1.0), ("rule", None, 0.5)],
+    # Ablation: rule-only baseline to compare against PRM
+    "math_rule":       [("rule", None, 1.0)],
 }
 
 

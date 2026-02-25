@@ -2085,3 +2085,221 @@ def rule_reward_func(queries):
     # Return rewards as torch.Tensor
     device = torch.cuda.current_device()
     return torch.tensor(rewards, dtype=torch.float).to(device)
+
+
+# ============================================================================
+# Process Reward Model (PRM) - URSA-8B-RM compatible
+# ============================================================================
+
+class MathPRMReward(nn.Module):
+    """
+    Process Reward Model (PRM) for mathematical reasoning steps.
+
+    Compatible with URSA-8B-RM and similar step-level math reward models
+    (e.g., Math-Shepherd PRM, Qwen-Math PRM).
+
+    Inference protocol:
+        1. The response text is split into reasoning steps by ``step_separator``.
+        2. Each step is appended with ``step_tag`` (default ``ки``, the Cyrillic
+           digraph used by Math-Shepherd / URSA-MATH training).
+        3. A single forward pass is run on the concatenated input.
+        4. At every ``step_tag`` token position, the logits from the *preceding*
+           token are used to compute P(good_token) / (P(good_token) + P(bad_token)).
+        5. Per-step probabilities are aggregated into a single scalar reward.
+
+    Args:
+        base_model: HuggingFace ``AutoModelForCausalLM`` instance.
+        tokenizer: Tokenizer paired with ``base_model``.
+        good_token: Token string predicting a correct step (default ``"+"``)
+        bad_token: Token string predicting an incorrect step (default ``"-"``)
+        step_tag: Tag appended after each step during inference (default ``"ки"``)
+        step_separator: Delimiter used to split the raw response into steps
+            (default ``"\\n\\n"``). Adjust to match the format of the math data.
+        aggregation: How to collapse per-step scores into a single reward.
+            Choices: ``"min"`` (most conservative), ``"mean"``, ``"last"``,
+            ``"product"``.  Default ``"min"``.
+    """
+
+    # Default step tag (Cyrillic ки = U+043A U+0438), shared by Math-Shepherd
+    # and URSA-MATH training data format.
+    DEFAULT_STEP_TAG = "ки"
+
+    def __init__(
+        self,
+        base_model: nn.Module,
+        tokenizer,
+        good_token: str = "+",
+        bad_token: str = "-",
+        step_tag: str = DEFAULT_STEP_TAG,
+        step_separator: str = "\n\n",
+        aggregation: str = "min",
+    ):
+        super().__init__()
+        self.model = base_model
+        self.tokenizer = tokenizer
+        self.step_tag = step_tag
+        self.step_separator = step_separator
+        self.aggregation = aggregation
+
+        # Resolve good / bad token IDs.  Many tokenizers prepend a space for
+        # "word-initial" tokens, so we try with and without the leading space.
+        def _get_single_token_id(token: str) -> int:
+            for candidate in [token, f" {token}"]:
+                ids = tokenizer.encode(candidate, add_special_tokens=False)
+                if len(ids) == 1:
+                    return ids[0]
+            # Fallback: take the last sub-token of the bare string
+            ids = tokenizer.encode(token, add_special_tokens=False)
+            return ids[-1]
+
+        self.good_token_id = _get_single_token_id(good_token)
+        self.bad_token_id = _get_single_token_id(bad_token)
+
+        # Resolve step-tag token sequence (may be one or two tokens).
+        self._step_tag_ids: List[int] = tokenizer.encode(step_tag, add_special_tokens=False)
+        if len(self._step_tag_ids) == 1:
+            self.step_tag_id: Optional[int] = self._step_tag_ids[0]
+        else:
+            # Multi-token step tag: we will search for the sub-sequence.
+            self.step_tag_id = None
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _extract_response(self, prompt_and_output: str) -> str:
+        """Return only the assistant response from a full conversation string."""
+        # Try common assistant delimiters (Qwen / ChatML / plain text)
+        for sep in [
+            "<|im_start|>assistant\n",
+            "<|start_header_id|>assistant<|end_header_id|>\n\n",  # llama3
+            "Assistant:",
+            "ASSISTANT:",
+        ]:
+            if sep in prompt_and_output:
+                return prompt_and_output.split(sep)[-1]
+        # Fallback: return the full text
+        return prompt_and_output
+
+    def _format_with_step_tags(self, response: str) -> str:
+        """Append step_tag after each reasoning step in *response*."""
+        steps = [s for s in response.split(self.step_separator) if s.strip()]
+        if not steps:
+            return response.strip() + f" {self.step_tag}"
+        return self.step_separator.join(s + f" {self.step_tag}" for s in steps)
+
+    def _find_step_tag_positions(self, seq: torch.Tensor) -> List[int]:
+        """Return token positions in *seq* where the step_tag ends."""
+        positions: List[int] = []
+        tag_ids = self._step_tag_ids
+        n = len(tag_ids)
+        seq_list = seq.tolist()
+
+        if n == 1:
+            # Fast path: single token
+            tid = tag_ids[0]
+            for j, tok in enumerate(seq_list):
+                if tok == tid:
+                    positions.append(j)
+        else:
+            # Sliding-window search for the sub-sequence
+            for j in range(len(seq_list) - n + 1):
+                if seq_list[j:j + n] == tag_ids:
+                    positions.append(j + n - 1)  # position of last tag token
+
+        return positions
+
+    def _aggregate(self, scores: List[float]) -> float:
+        if not scores:
+            return 0.5  # neutral fallback
+        if self.aggregation == "min":
+            return min(scores)
+        if self.aggregation == "mean":
+            return sum(scores) / len(scores)
+        if self.aggregation == "last":
+            return scores[-1]
+        if self.aggregation == "product":
+            r = 1.0
+            for s in scores:
+                r *= s
+            return r
+        raise ValueError(f"Unknown aggregation: {self.aggregation!r}")
+
+    # ------------------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def forward(
+        self,
+        sequences,
+        attention_mask,
+        prompt_and_output=None,
+        raw_images=None,  # ignored – text-only PRM
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Compute per-sequence rewards using step-level PRM scoring.
+
+        Args:
+            sequences: Token IDs (B, seq_len) or None.
+            attention_mask: Attention mask (B, seq_len) or None.
+            prompt_and_output: List[str] of decoded ``prompt + response`` texts.
+                Preferred over decoding ``sequences`` because it avoids round-trip
+                tokenization artifacts.
+            raw_images: Ignored (text-only model).
+
+        Returns:
+            FloatTensor of shape (B,) with aggregated step rewards in [0, 1].
+        """
+        device = next(self.model.parameters()).device
+
+        if prompt_and_output is None or not isinstance(prompt_and_output, (list, tuple)):
+            if sequences is not None:
+                prompt_and_output = self.tokenizer.batch_decode(
+                    sequences, skip_special_tokens=True
+                )
+            else:
+                raise ValueError("Either sequences or prompt_and_output must be provided")
+
+        batch_rewards: List[float] = []
+
+        for text in prompt_and_output:
+            response = self._extract_response(text)
+            formatted = self._format_with_step_tags(response)
+
+            encoding = self.tokenizer(
+                formatted,
+                return_tensors="pt",
+                add_special_tokens=True,
+                truncation=True,
+                max_length=4096,
+            )
+            input_ids = encoding.input_ids.to(device)       # (1, L)
+            local_mask = encoding.attention_mask.to(device)  # (1, L)
+
+            outputs = self.model(input_ids=input_ids, attention_mask=local_mask)
+            logits = outputs.logits[0]  # (L, V)
+
+            step_positions = self._find_step_tag_positions(input_ids[0])
+
+            if not step_positions:
+                # No step boundaries found: score the last valid token position
+                last_pos = int(local_mask[0].nonzero()[-1].item())
+                step_positions = [last_pos]
+
+            step_scores: List[float] = []
+            for pos in step_positions:
+                if pos == 0:
+                    continue
+                # Logits at [pos - 1] predict the token at position [pos].
+                # The step-tag itself is at [pos]; the distribution *before* it
+                # indicates whether the preceding step is correct.
+                pos_logits = logits[pos - 1]  # (V,)
+                good_bad = pos_logits[[self.good_token_id, self.bad_token_id]]
+                probs = torch.softmax(good_bad, dim=-1)
+                step_scores.append(float(probs[0].item()))
+
+            batch_rewards.append(self._aggregate(step_scores))
+
+        return torch.tensor(batch_rewards, dtype=torch.float32, device=device)
