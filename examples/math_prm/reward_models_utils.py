@@ -311,7 +311,7 @@ def _load_ursa_prm_model(
 
     :param pretrain_path: Path to the URSA-8B-RM checkpoint directory.
     :type pretrain_path: str
-    :param device: Target device (unused; caller places model on device).
+    :param device: Target device for model placement (e.g., torch.device('cuda:0')).
     :type device: torch.device
     :param ursa_math_path: Deprecated parameter, kept for compatibility.
     :type ursa_math_path: str, optional
@@ -342,7 +342,10 @@ def _load_ursa_prm_model(
         pretrain_path, torch_dtype=torch.bfloat16
     )
     processor = UrsaProcessor.from_pretrained(pretrain_path)
-    print(f"[_load_ursa_prm_model] Loaded URSA-8B-RM from {pretrain_path}")
+
+    # Move model to specified device
+    model = model.to(device)
+    print(f"[_load_ursa_prm_model] Loaded URSA-8B-RM from {pretrain_path} to device {device}")
     return model, processor
 
 
