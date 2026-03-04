@@ -59,6 +59,32 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from reward_models_utils import load_reward_models, reward_fn, RECIPE
 
 
+def is_ursa_model(model_path: str) -> bool:
+    """
+    Check if the model is a URSA model by looking for URSA-specific config files.
+
+    Args:
+        model_path: Path to the model directory
+
+    Returns:
+        True if this is a URSA model, False otherwise
+    """
+    import os
+    # Check for URSA-specific config file
+    config_path = os.path.join(model_path, "config.json")
+    if os.path.exists(config_path):
+        try:
+            import json
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+                # URSA models have model_type="ursa" in their config
+                if config.get("model_type") == "ursa":
+                    return True
+        except:
+            pass
+    return False
+
+
 def train(args):
     """
     Main training function for GRPO with co-located reward models.
@@ -96,8 +122,15 @@ def train(args):
     with strategy.init_model_context(meta_init=args.meta_init):
         strategy.print(f"Initializing models with meta_init={args.meta_init}")
 
-        # Select Actor class based on text_only flag
-        if args.text_only:
+        # Check if this is a URSA model
+        is_ursa = is_ursa_model(args.pretrain)
+
+        # Select Actor class based on model type and text_only flag
+        if is_ursa:
+            strategy.print(f"Detected URSA model, using UrsaActor")
+            from ursa_actor import UrsaActor
+            Actor = UrsaActor
+        elif args.text_only:
             Actor = ActorLanguage
         else:
             Actor = ActorVL
@@ -174,6 +207,7 @@ def train(args):
     if args.init_kl_coef == 0:
         initial_model = None
     else:
+        # Use the same Actor class (including URSA if detected)
         initial_model = Actor(
             args.pretrain,
             use_flash_attention_2=args.flash_attn,
@@ -189,6 +223,7 @@ def train(args):
             strategy.offload_model(initial_model)
 
     if args.enable_ema:
+        # Use the same Actor class (including URSA if detected)
         ema_model = Actor(
             args.pretrain,
             use_flash_attention_2=args.flash_attn,
