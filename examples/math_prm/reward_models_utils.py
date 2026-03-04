@@ -297,7 +297,6 @@ def _load_hf_text_model(
 def _load_ursa_prm_model(
     pretrain_path: str,
     device: torch.device,
-    ursa_math_path: str = None,
 ) -> Tuple[Any, Any]:
     """
     Load ``UrsaForTokenClassification`` and ``UrsaProcessor`` for URSA-8B-RM.
@@ -313,8 +312,6 @@ def _load_ursa_prm_model(
     :type pretrain_path: str
     :param device: Target device for model placement (e.g., torch.device('cuda:0')).
     :type device: torch.device
-    :param ursa_math_path: Deprecated parameter, kept for compatibility.
-    :type ursa_math_path: str, optional
     :return: Tuple of (UrsaForTokenClassification, UrsaProcessor)
     :rtype: Tuple[Any, Any]
     :raises ImportError: If the URSA model classes cannot be imported.
