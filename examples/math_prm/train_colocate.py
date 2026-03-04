@@ -61,7 +61,12 @@ from reward_models_utils import load_reward_models, reward_fn, RECIPE
 
 def is_ursa_model(model_path: str) -> bool:
     """
-    Check if the model is a URSA model by looking for URSA-specific config files.
+    Check if the model is a URSA model by looking for URSA-specific config.
+
+    URSA models have:
+    - architectures: ["UrsaForConditionalGeneration"]
+    - model_type: "ursa"
+    - vision_config and aligner_config sections
 
     Args:
         model_path: Path to the model directory
@@ -70,14 +75,17 @@ def is_ursa_model(model_path: str) -> bool:
         True if this is a URSA model, False otherwise
     """
     import os
-    # Check for URSA-specific config file
     config_path = os.path.join(model_path, "config.json")
     if os.path.exists(config_path):
         try:
             import json
             with open(config_path, 'r') as f:
                 config = json.load(f)
-                # URSA models have model_type="ursa" in their config
+                # Check for UrsaForConditionalGeneration in architectures
+                architectures = config.get("architectures", [])
+                if "UrsaForConditionalGeneration" in architectures:
+                    return True
+                # Fallback: check model_type
                 if config.get("model_type") == "ursa":
                     return True
         except:
