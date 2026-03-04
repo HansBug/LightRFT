@@ -302,47 +302,38 @@ def _load_ursa_prm_model(
     """
     Load ``UrsaForTokenClassification`` and ``UrsaProcessor`` for URSA-8B-RM.
 
-    ``UrsaForTokenClassification`` is a custom multi-modal model defined in the
-    URSA-MATH repository.  It has a ``score = nn.Linear(hidden_size, 1)`` head
-    and outputs per-token scalar logits (shape ``(batch, seq_len, 1)``), NOT
-    vocabulary logits.
+    ``UrsaForTokenClassification`` is a custom multi-modal model with a
+    ``score = nn.Linear(hidden_size, 1)`` head that outputs per-token scalar
+    logits (shape ``(batch, seq_len, 1)``), NOT vocabulary logits.
 
-    The path to the URSA-MATH repository is resolved in the following order:
-
-    1. The ``ursa_math_path`` argument passed to this function.
-    2. The ``URSA_MATH_PATH`` environment variable.
-    3. The hard-coded default ``/home/hansbug/sensetime-projects/URSA-MATH``.
+    The URSA model code is now self-contained in examples/math_prm/ursa_model/
+    and does not require the URSA-MATH repository.
 
     :param pretrain_path: Path to the URSA-8B-RM checkpoint directory.
     :type pretrain_path: str
     :param device: Target device (unused; caller places model on device).
     :type device: torch.device
-    :param ursa_math_path: Path to the URSA-MATH repository root.
-        If ``None``, resolved from ``URSA_MATH_PATH`` env var or the default.
+    :param ursa_math_path: Deprecated parameter, kept for compatibility.
     :type ursa_math_path: str, optional
     :return: Tuple of (UrsaForTokenClassification, UrsaProcessor)
     :rtype: Tuple[Any, Any]
-    :raises ImportError: If the URSA-MATH model classes cannot be imported.
+    :raises ImportError: If the URSA model classes cannot be imported.
     """
     import sys
     import os
 
-    if ursa_math_path is None:
-        ursa_math_path = os.environ.get(
-            'URSA_MATH_PATH',
-            '/home/hansbug/sensetime-projects/URSA-MATH',
-        )
-    if ursa_math_path not in sys.path:
-        sys.path.insert(0, ursa_math_path)
+    # Add the examples/math_prm directory to sys.path to import ursa_model
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    if current_dir not in sys.path:
+        sys.path.insert(0, current_dir)
 
     try:
-        from models.ursa_model import UrsaProcessor, UrsaForTokenClassification
+        from ursa_model import UrsaProcessor, UrsaForTokenClassification
     except ImportError as exc:
         raise ImportError(
             f"Cannot import UrsaForTokenClassification / UrsaProcessor from "
-            f"'{ursa_math_path}/models/ursa_model'. "
-            f"Make sure the URSA-MATH repository is available at that path, "
-            f"or set the URSA_MATH_PATH environment variable. "
+            f"'{current_dir}/ursa_model'. "
+            f"Make sure the ursa_model directory exists with all required files. "
             f"Original error: {exc}"
         ) from exc
 
@@ -614,8 +605,8 @@ def build_math_prm(
     per-token hidden-state logits from ``UrsaForTokenClassification``, which
     are not available through an SGLang/vLLM engine interface.
 
-    The URSA-MATH repository path is resolved via the ``URSA_MATH_PATH``
-    environment variable (default: ``/home/hansbug/sensetime-projects/URSA-MATH``).
+    The URSA model code is now self-contained in examples/math_prm/ursa_model/
+    and does not require the external URSA-MATH repository.
 
     :param cfg: Reward model configuration.  ``use_engine`` is ignored.
     :type cfg: RewardModelConfig
