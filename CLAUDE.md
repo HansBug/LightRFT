@@ -1,235 +1,235 @@
 # CLAUDE.md
 
-Note: `AGENTS.md` is a symlink to `CLAUDE.md`, so they are the same file. Do not edit both separately or duplicate the same change.
+注意：`AGENTS.md` 是指向 `CLAUDE.md` 的符号链接，因此它们是同一个文件。不要分别编辑两者，也不要重复进行相同修改。
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+本文件为 Claude Code（claude.ai/code）在此仓库中处理代码时提供指导。
 
-## About LightRFT
+## 关于 LightRFT
 
-LightRFT is a reinforcement fine-tuning (RFT) framework for LLMs and VLMs, built on top of [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF). It supports GRPO, GSPO, GMPO, Dr.GRPO, DAPO, REINFORCE++, CPGD, and FIRE Sampling algorithms, with vLLM/SGLang inference engines and FSDP/DeepSpeed training strategies.
+LightRFT 是一个面向 LLM 和 VLM 的强化微调（RFT）框架，构建于 [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF) 之上。它支持 GRPO、GSPO、GMPO、Dr.GRPO、DAPO、REINFORCE++、CPGD 和 FIRE Sampling 算法，并提供 vLLM/SGLang 推理引擎与 FSDP/DeepSpeed 训练策略。
 
-## Common Commands
+## 常用命令
 
-### Installation
+### 安装
 ```bash
 pip install -r requirements.txt
 pip install -e .
-pip install -r requirements-dev.txt  # for linting/formatting
+pip install -r requirements-dev.txt  # 用于 lint/格式化
 ```
 
-### Code Formatting & Linting
+### 代码格式化与 Lint
 ```bash
-make format    # YAPF formatting (line length 120)
-make fcheck    # Flake8 linting
+make format    # YAPF 格式化（行长 120）
+make fcheck    # Flake8 lint 检查
 ```
 
-### Documentation
+### 文档
 ```bash
-make docs       # Build Sphinx HTML docs → docs/build/index.html
-make docs-live  # Live preview at http://localhost:8000
+make docs       # 构建 Sphinx HTML 文档 → docs/build/index.html
+make docs-live  # 实时预览，地址为 http://localhost:8000
 ```
 
-### Running Tests
-Tests are in `lightrft/models/tests/` and use pytest:
+### 运行测试
+测试位于 `lightrft/models/tests/` 中，并使用 pytest：
 ```bash
 python -m pytest lightrft/models/tests/test_actor_language.py
 python -m pytest lightrft/models/tests/test_actor_vl.py
 python -m pytest lightrft/models/tests/test_actorvl_fused_linear_logprob.py
 ```
 
-### Running a Training Example
+### 运行训练示例
 ```bash
-# Preprocess dataset first (example for GSM8K):
+# 先对数据集进行预处理（以 GSM8K 为例）：
 python examples/data_preprocess/gsm8k_lightrft.py --local_save_dir /path/to/output
 
-# Then launch training (8 GPUs, single node):
+# 然后启动训练（8 张 GPU，单节点）：
 bash examples/gsm8k_geo3k/run_grpo_gsm8k_qwen2.5_0.5b.sh
 
-# VLM example (Geo3K):
+# VLM 示例（Geo3K）：
 bash examples/gsm8k_geo3k/run_grpo_geo3k_qwen2.5_vl_7b.sh
 ```
 
-Training is launched via `torchrun` with `train_colocate.py` inside each example directory.
+训练通过各示例目录中的 `train_colocate.py`，使用 `torchrun` 启动。
 
 ### Docker
 ```bash
-make dbuild   # Builds opendilab/lightrft:v<VERSION>
-make dpush    # Pushes to Docker Hub
+make dbuild   # 构建 opendilab/lightrft:v<VERSION>
+make dpush    # 推送到 Docker Hub
 ```
 
-## Architecture Overview
+## 架构概览
 
-### Core Training Flow
+### 核心训练流程
 
-The typical RLHF training loop works as follows:
-1. **Experience generation** (`FastExperienceMaker`): runs policy model via vLLM/SGLang, scores with reward models, computes advantages.
-2. **Training** (`SPMDPPOTrainer`): updates the actor using PPO-style policy loss; optionally co-locates reward models on the same GPUs.
-3. **Strategy** (`DeepspeedStrategy` / `FSDPV2Strategy`): wraps models for distributed training with a uniform API.
+典型的 RLHF 训练循环工作方式如下：
+1. **经验生成**（`FastExperienceMaker`）：通过 vLLM/SGLang 运行策略模型，使用奖励模型打分，并计算 advantage。
+2. **训练**（`SPMDPPOTrainer`）：使用 PPO 风格的策略损失更新 actor；可选地将奖励模型与 actor 共置于同一组 GPU 上。
+3. **策略**（`DeepspeedStrategy` / `FSDPV2Strategy`）：以统一 API 包装模型，用于分布式训练。
 
-### Real End-to-End Control Flow in Current Code
+### 当前代码中的真实端到端控制流
 
-The most useful way to understand the framework is to follow the actual runtime chain used by the example scripts:
+理解该框架最有用的方式，是沿着示例脚本实际使用的运行链路去看：
 
-1. **Training script assembles everything**  
-   Example: `examples/gsm8k_geo3k/train_colocate.py`
-   - Parse args
-   - Build strategy with `get_strategy(args)`
-   - Build actor / critic / reward models / initial model
-   - Build tokenizer / processor / datasets / dataloaders
-   - Call `strategy.setup_inference_engine(...)`
-   - Instantiate `SPMDPPOTrainer` or `SPMDPPOTrainerVL`
-   - Call `trainer.fit(...)`
+1. **训练脚本组装一切**  
+   示例：`examples/gsm8k_geo3k/train_colocate.py`
+   - 解析参数
+   - 使用 `get_strategy(args)` 构建策略
+   - 构建 actor / critic / 奖励模型 / 初始模型
+   - 构建 tokenizer / processor / 数据集 / dataloader
+   - 调用 `strategy.setup_inference_engine(...)`
+   - 实例化 `SPMDPPOTrainer` 或 `SPMDPPOTrainerVL`
+   - 调用 `trainer.fit(...)`
 
-2. **`trainer.fit()` drives the outer loop**  
-   In `ppo_trainer.py` / `ppo_trainer_vl.py`, `fit()` iterates:
-   - sample prompt batch
-   - call `experience_maker.make_experience_list(...)`
-   - append experiences into replay buffer
-   - run `ppo_train(...)`
-   - clear replay buffer
-   - log / save / update KL controller
+2. **`trainer.fit()` 驱动外层循环**  
+   在 `ppo_trainer.py` / `ppo_trainer_vl.py` 中，`fit()` 会迭代执行：
+   - 采样 prompt 批次
+   - 调用 `experience_maker.make_experience_list(...)`
+   - 将经验追加到 replay buffer
+   - 运行 `ppo_train(...)`
+   - 清空 replay buffer
+   - 记录日志 / 保存 / 更新 KL 控制器
 
-3. **`FastExperienceMaker` builds trainable experiences**  
-   `FastExperienceMaker.make_experience_list(...)` is the real rollout pipeline:
-   - `generate_samples(...)`: call vLLM/SGLang to generate responses
-   - shard-parallel preprocess via `strategy.sp_data_processor.preprocess(...)`
-   - `_make_experience_list_by_model(...)`: run actor / initial model / critic / reward models
-   - shard-parallel postprocess
-   - `_process_experiences(...)`: reward shaping, dynamic filtering, overlong penalty
-   - `_compute_advantages_and_returns(...)`: KL-adjusted reward, returns, advantages
+3. **`FastExperienceMaker` 构建可训练经验**  
+   `FastExperienceMaker.make_experience_list(...)` 是真实的 rollout 流水线：
+   - `generate_samples(...)`：调用 vLLM/SGLang 生成响应
+   - 通过 `strategy.sp_data_processor.preprocess(...)` 做分片并行预处理
+   - `_make_experience_list_by_model(...)`：运行 actor / 初始模型 / critic / 奖励模型
+   - 分片并行后处理
+   - `_process_experiences(...)`：奖励塑形、动态过滤、超长惩罚
+   - `_compute_advantages_and_returns(...)`：KL 调整后的奖励、returns、advantages
 
-4. **Trainer consumes `Experience` objects and updates models**  
-   `training_step_actor(...)` and `training_step_critic(...)` in `ppo_trainer.py` / `ppo_trainer_vl.py`:
-   - actor forward -> fresh logprobs
-   - `PolicyLoss` computes PPO/CPGD-style loss
-   - optional KL loss term / PTX loss / aux loss
+4. **Trainer 消费 `Experience` 对象并更新模型**  
+   `ppo_trainer.py` / `ppo_trainer_vl.py` 中的 `training_step_actor(...)` 和 `training_step_critic(...)`：
+   - actor 前向传播 -> 最新 logprobs
+   - `PolicyLoss` 计算 PPO/CPGD 风格损失
+   - 可选的 KL 损失项 / PTX 损失 / 辅助损失
    - `strategy.backward(...)`
    - `strategy.optimizer_step(...)`
 
-5. **Updated actor weights are pushed back to the rollout engine**  
-   After `ppo_train(...)`, `SPMDPPOTrainerBase` calls:
+5. **更新后的 actor 权重会被推回 rollout 引擎**  
+   在 `ppo_train(...)` 之后，`SPMDPPOTrainerBase` 会调用：
    - `strategy.update_engine_weights(actor)`
-   This is important: the training model and the rollout engine are separate objects.
+   这一点很重要：训练模型和 rollout 引擎是两个独立对象。
 
-### Layered Architecture
+### 分层架构
 
-Think of the codebase as six layers that interact in one direction:
+可以把代码库理解为六个单向交互的层次：
 
-1. **Experiment assembly layer**: example `train_colocate.py` scripts
-2. **Distributed/runtime layer**: `lightrft/strategy/`
-3. **Training loop layer**: `lightrft/trainer/ppo_trainer*.py`, `spmd_ppo_trainer.py`
-4. **Experience construction layer**: `fast_exp_maker.py`, `experience_maker*.py`
-5. **Model/loss layer**: `lightrft/models/`
-6. **Dataset/schema layer**: `lightrft/datasets/`
+1. **实验组装层**：示例 `train_colocate.py` 脚本
+2. **分布式/运行时层**：`lightrft/strategy/`
+3. **训练循环层**：`lightrft/trainer/ppo_trainer*.py`、`spmd_ppo_trainer.py`
+4. **经验构建层**：`fast_exp_maker.py`、`experience_maker*.py`
+5. **模型/损失层**：`lightrft/models/`
+6. **数据集/schema 层**：`lightrft/datasets/`
 
-When customizing LightRFT, the right question is usually not "where is algorithm X?" but:
-- Is this change about rollout?
-- reward shaping?
-- advantage computation?
-- policy loss?
-- distributed execution?
-- data schema?
+在定制 LightRFT 时，正确的问题通常不是“算法 X 在哪里？”，而是：
+- 这项改动与 rollout 有关吗？
+- 与奖励塑形有关吗？
+- 与 advantage 计算有关吗？
+- 与策略损失有关吗？
+- 与分布式执行有关吗？
+- 与数据 schema 有关吗？
 
-Many named algorithms in the repo are implemented as a composition across these layers rather than as a standalone trainer class.
+仓库中许多具名算法，都是跨这些层组合实现的，而不是作为独立 trainer 类存在。
 
-### Key Modules
+### 关键模块
 
-**`lightrft/trainer/`** — Core training logic:
-- `spmd_ppo_trainer.py`: The primary trainer (`SPMDPPOTrainer`, `SPMDPPOTrainerVL`). Extends `PPOTrainer` with SPMD/tensor-parallel support. This is the "entry point" for understanding how training works end-to-end.
-- `fast_exp_maker.py`: `FastExperienceMaker` — handles rollout generation via vLLM/SGLang, reward aggregation, model-side experience assembly, reward shaping, and advantage computation. The most important extension points are `generate_samples()`, `_process_experiences()`, `_compute_advantages_and_returns()`, and `_make_experience_list_by_model()`.
-- `advantage_calculator.py`: Pluggable advantage estimators (GAE, Group Norm/GRPO, RLOO, REINFORCE++, CPGD). Use `get_advantage_calculator()` factory.
-- `ppo_trainer.py` / `ppo_trainer_vl.py`: Base PPO trainer (ABC) for LLM and VLM respectively.
-- `experience_maker.py`: `NaiveExperienceMaker` base class; `FastExperienceMaker` inherits from this.
-- `replay_buffer.py` / `replay_buffer_vl.py`: Experience replay buffers with packing support.
+**`lightrft/trainer/`** — 核心训练逻辑：
+- `spmd_ppo_trainer.py`：主 Trainer（`SPMDPPOTrainer`、`SPMDPPOTrainerVL`）。在 `PPOTrainer` 基础上扩展了 SPMD/张量并行支持。这里是理解训练端到端工作方式的“入口点”。
+- `fast_exp_maker.py`：`FastExperienceMaker` —— 负责通过 vLLM/SGLang 进行 rollout 生成、奖励聚合、模型侧经验组装、奖励塑形和 advantage 计算。最重要的扩展点是 `generate_samples()`、`_process_experiences()`、`_compute_advantages_and_returns()` 和 `_make_experience_list_by_model()`。
+- `advantage_calculator.py`：可插拔的 advantage 估计器（GAE、Group Norm/GRPO、RLOO、REINFORCE++、CPGD）。使用 `get_advantage_calculator()` 工厂。
+- `ppo_trainer.py` / `ppo_trainer_vl.py`：分别面向 LLM 和 VLM 的基础 PPO trainer（ABC）。
+- `experience_maker.py`：`NaiveExperienceMaker` 基类；`FastExperienceMaker` 继承自它。
+- `replay_buffer.py` / `replay_buffer_vl.py`：支持 packing 的经验回放缓冲区。
 
-**`lightrft/strategy/`** — Distributed training abstraction:
-- `strategy_base.py`: `StrategyBase` ABC with `backward()`, `optimizer_step()`, `save_ckpt()` API.
-- `strategy.py`: `get_strategy(args)` factory — picks DeepSpeed or FSDP based on `args.fsdp`.
-- `deepspeed/deepspeed.py`: DeepSpeed ZeRO (Stage 1/2/3) strategy.
-- `fsdp/fsdpv2.py`: FSDP v2 strategy.
-- `config.py`: `StrategyConfig` dataclass (typed access to all strategy params; use `StrategyConfig.from_args(args)` to construct).
-- `fake_strategy.py`: `FakeStrategy` for single-process unit testing without distributed setup.
+**`lightrft/strategy/`** — 分布式训练抽象：
+- `strategy_base.py`：带有 `backward()`、`optimizer_step()`、`save_ckpt()` API 的 `StrategyBase` 抽象基类。
+- `strategy.py`：`get_strategy(args)` 工厂 —— 根据 `args.fsdp` 选择 DeepSpeed 或 FSDP。
+- `deepspeed/deepspeed.py`：DeepSpeed ZeRO（Stage 1/2/3）策略。
+- `fsdp/fsdpv2.py`：FSDP v2 策略。
+- `config.py`：`StrategyConfig` 数据类（为所有策略参数提供类型化访问；使用 `StrategyConfig.from_args(args)` 构造）。
+- `fake_strategy.py`：`FakeStrategy`，用于无需分布式环境的单进程单元测试。
 
-**`lightrft/models/`** — Model wrappers:
-- `actor_language.py`: LLM actor wrapping HuggingFace causal LM.
-- `actor_vl.py` / `actor_al.py`: VLM and audio-LM actors.
-- `actor_modality.py`: `ActorModality` base that both LLM and VLM actors extend.
-- `loss.py`: `PolicyLoss` (PPO/GSPO/GMPO/Dr.GRPO/DAPO/Token-Level Policy variants all flow through here), `ValueLoss`, `GPTLMLoss`.
-- `srm_vl.py` / `srm_al.py`: Scalar reward model wrappers.
-- `grm_vl.py`: Generative reward model (VLM).
-- `monkey_patch/`: Patches for distributed training compatibility.
+**`lightrft/models/`** — 模型包装器：
+- `actor_language.py`：包装 HuggingFace causal LM 的 LLM actor。
+- `actor_vl.py` / `actor_al.py`：VLM 和音频-LM actor。
+- `actor_modality.py`：LLM 和 VLM actor 都会扩展的 `ActorModality` 基类。
+- `loss.py`：`PolicyLoss`（PPO/GSPO/GMPO/Dr.GRPO/DAPO/Token-Level Policy 变体都流经这里）、`ValueLoss`、`GPTLMLoss`。
+- `srm_vl.py` / `srm_al.py`：标量奖励模型包装器。
+- `grm_vl.py`：生成式奖励模型（VLM）。
+- `monkey_patch/`：用于分布式训练兼容性的补丁。
 
-**`lightrft/datasets/`** — Dataset handlers, each implementing a dataset-specific preprocessing interface. `prompts_dataset.py` (LLM) and `prompts_dataset_vl.py` (VLM) are the main training datasets; others are for reward model training.
+**`lightrft/datasets/`** — 数据集处理器，每个处理器都实现特定于数据集的预处理接口。`prompts_dataset.py`（LLM）和 `prompts_dataset_vl.py`（VLM）是主要训练数据集；其他则用于奖励模型训练。
 
-**`lightrft/utils/`**:
-- `cli_args.py`: `add_arguments()` adds engine/FSDP/logging CLI args to any `argparse.ArgumentParser`.
-- `remote_rm_utils.py`: Utilities for calling remote reward model HTTP APIs.
-- `trajectory_saver.py`: Saves rollout trajectories for analysis.
-- `processor.py`: HuggingFace tokenizer/processor wrapper.
+**`lightrft/utils/`**：
+- `cli_args.py`：`add_arguments()` 会将 engine/FSDP/logging CLI 参数添加到任意 `argparse.ArgumentParser` 中。
+- `remote_rm_utils.py`：调用远程奖励模型 HTTP API 的工具函数。
+- `trajectory_saver.py`：保存 rollout 轨迹用于分析。
+- `processor.py`：HuggingFace tokenizer/processor 包装器。
 
-### Algorithm Extension Points
+### 算法扩展点
 
-| To change... | Edit... |
+| 若要修改…… | 编辑…… |
 |---|---|
-| Policy loss objective / clipping rule | `lightrft/models/loss.py` → `PolicyLoss.forward()` |
-| Advantage estimation method | `lightrft/trainer/advantage_calculator.py` |
-| Rollout generation / FIRE sampling | `lightrft/trainer/fast_exp_maker.py` → `generate_samples()` |
-| Reward shaping / normalization / overlong penalty | `lightrft/trainer/fast_exp_maker.py` → `_process_experiences()` / `_compute_advantages_and_returns()` |
-| Reward model execution / aggregation | `lightrft/trainer/fast_exp_maker.py` → `RewardComputationEngine` |
-| Model-side experience construction | `lightrft/trainer/fast_exp_maker.py` → `_make_experience_list_by_model()` |
-| Distributed training backend | `lightrft/strategy/` |
-| Dataset schema / prompt-image-reference extraction | `lightrft/datasets/prompts_dataset.py` / `prompts_dataset_vl.py` |
+| 策略损失目标 / 裁剪规则 | `lightrft/models/loss.py` → `PolicyLoss.forward()` |
+| Advantage 估计方法 | `lightrft/trainer/advantage_calculator.py` |
+| Rollout 生成 / FIRE sampling | `lightrft/trainer/fast_exp_maker.py` → `generate_samples()` |
+| 奖励塑形 / 归一化 / 超长惩罚 | `lightrft/trainer/fast_exp_maker.py` → `_process_experiences()` / `_compute_advantages_and_returns()` |
+| 奖励模型执行 / 聚合 | `lightrft/trainer/fast_exp_maker.py` → `RewardComputationEngine` |
+| 模型侧经验构建 | `lightrft/trainer/fast_exp_maker.py` → `_make_experience_list_by_model()` |
+| 分布式训练后端 | `lightrft/strategy/` |
+| 数据集 schema / prompt-image-reference 提取 | `lightrft/datasets/prompts_dataset.py` / `prompts_dataset_vl.py` |
 
-### Training Entry Points (examples)
+### 训练入口（示例）
 
-Each example has its own `train_colocate.py`. They share the same general structure:
-1. Parse args via `argparse` + `lightrft.utils.cli_args.add_arguments`
-2. Build strategy via `get_strategy(args)`
-3. Load actor, reference model, reward models
-4. Instantiate `SPMDPPOTrainer` (or VL variant)
-5. Call `trainer.fit()`
+每个示例都有自己的 `train_colocate.py`。它们共享相同的一般结构：
+1. 通过 `argparse` + `lightrft.utils.cli_args.add_arguments` 解析参数
+2. 通过 `get_strategy(args)` 构建策略
+3. 加载 actor、reference model、奖励模型
+4. 实例化 `SPMDPPOTrainer`（或 VL 变体）
+5. 调用 `trainer.fit()`
 
-### Important Implementation Reality Notes
+### 重要实现现实说明
 
-These points matter when modifying the code:
+在修改代码时，以下几点很关键：
 
-- **Current mainline training path uses `FastExperienceMaker`, not `NaiveExperienceMaker`.**  
-  If you are changing rollout, reward shaping, or advantage logic for real training, start with `fast_exp_maker.py`.
+- **当前主线训练路径使用的是 `FastExperienceMaker`，不是 `NaiveExperienceMaker`。**  
+  如果你是在为真实训练修改 rollout、奖励塑形或 advantage 逻辑，请从 `fast_exp_maker.py` 开始。
 
-- **The training actor and rollout engine are separate.**  
-  Updating the PyTorch actor is not enough; the trainer later calls `strategy.update_engine_weights(actor)` to push weights into vLLM/SGLang.
+- **训练 actor 和 rollout 引擎是分离的。**  
+  仅更新 PyTorch actor 还不够；trainer 之后还会调用 `strategy.update_engine_weights(actor)` 将权重推送到 vLLM/SGLang。
 
-- **Algorithms are distributed across layers.**  
-  For example:
-  - GRPO / group norm / RLOO / REINFORCE++ are primarily in `advantage_calculator.py`
-  - DAPO-like behavior is currently represented mainly by dynamic sampling and overlong reward shaping in `fast_exp_maker.py`
-  - CPGD is split between `advantage_calculator.py` and `PolicyLoss`
+- **算法分布在多个层中。**  
+  例如：
+  - GRPO / group norm / RLOO / REINFORCE++ 主要位于 `advantage_calculator.py`
+  - 类 DAPO 行为目前主要体现为 `fast_exp_maker.py` 中的动态采样和超长奖励塑形
+  - CPGD 被拆分在 `advantage_calculator.py` 和 `PolicyLoss` 之间
 
-- **Not every algorithm name in docs corresponds to a fully separate implementation path.**  
-  Some feature flags are partially wired through scripts/trainers but do not yet have a full dedicated implementation branch in `PolicyLoss`. Check the actual call chain before assuming a flag is active.
+- **文档中的每个算法名称都不一定对应一条完全独立的实现路径。**  
+  某些功能开关虽然部分接入了脚本/trainer，但在 `PolicyLoss` 中尚未拥有完整的专用实现分支。在假定某个 flag 已生效之前，请先检查实际调用链。
 
-- **If a new runtime parameter is consumed via `self.strategy.config.xxx`, you must update `StrategyConfig`.**  
-  Adding only an argparse flag is not enough if the fast path reads from `StrategyConfig.from_args(args)`.
+- **如果某个新的运行时参数通过 `self.strategy.config.xxx` 被消费，你必须更新 `StrategyConfig`。**  
+  如果快速路径是从 `StrategyConfig.from_args(args)` 读取配置，那么仅添加 argparse flag 是不够的。
 
-## Commit Style
+## 提交风格
 
-Follow the dominant repository convention from recent history, using Conventional-Commit-style subjects:
-- Prefer `type(scope): imperative summary`
-- Common types in this repository: `feature`, `fix`, `polish`, `docs`, `style`, `refactor`
-- Example: `feature(trainer): add CPGD advantage estimator`
-- Keep `type` and `scope` lowercase when present
-- Omit the scope only when the change genuinely spans the whole repository
-- Write the summary as a concise imperative phrase starting with a lowercase verb such as `add`, `update`, `improve`, `align`, or `clean up`
-- Do not add a trailing period to the subject line
-- For non-trivial changes, add a blank line and then a body
-- In the body, prefer a short overview paragraph first, followed by `-` bullet points for concrete changes, tests, compatibility notes, docs updates, or behavior clarifications
-- When a bullet wraps, continue it on the next indented line instead of starting a new bullet
-- Preserve standard trailers when applicable, especially `Co-Authored-By: Name <email>`
-- Merge commits should keep the generated history style, such as `Merge branch 'main' into dev/...` or `Merge pull request #52 from ...`
+遵循该仓库近期历史中的主流约定，使用 Conventional-Commit 风格的主题行：
+- 优先使用 `type(scope): imperative summary`
+- 本仓库常见的类型有：`feature`、`fix`、`polish`、`docs`、`style`、`refactor`
+- 示例：`feature(trainer): add CPGD advantage estimator`
+- 若存在 `type` 和 `scope`，请保持小写
+- 仅当改动确实横跨整个仓库时才省略 scope
+- 主题行应写成简洁的祈使短语，以小写动词开头，例如 `add`、`update`、`improve`、`align` 或 `clean up`
+- 主题行末尾不要加句号
+- 对于非平凡改动，添加一个空行后再写正文
+- 在正文中，优先先写一个简短概述段落，然后使用 `-` 项目符号列出具体改动、测试、兼容性说明、文档更新或行为澄清
+- 当项目符号换行时，应在下一行继续缩进，而不是开始新的项目符号
+- 适用时保留标准 trailer，尤其是 `Co-Authored-By: Name <email>`
+- 合并提交应保留生成的历史风格，例如 `Merge branch 'main' into dev/...` 或 `Merge pull request #52 from ...`
 
-## PR Checklist
+## PR 检查清单
 
-Before opening a PR, run:
+在打开 PR 之前，运行：
 ```bash
 make format
 make fcheck
@@ -237,61 +237,61 @@ make fcheck
 
 ---
 
-## Deep Dive: Module Functionality & Extension Guide
+## 深入解析：模块功能与扩展指南
 
-This section provides detailed analysis of each major module and practical guidance for extending the framework with custom algorithms, models, and training strategies.
+本节提供对各个主要模块的详细分析，以及扩展框架以支持自定义算法、模型和训练策略的实用指导。
 
-### 1. Trainer Module (`lightrft/trainer/`)
+### 1. Trainer 模块（`lightrft/trainer/`）
 
-The trainer module orchestrates the entire RLHF training loop, from experience generation to policy updates.
+Trainer 模块编排整个 RLHF 训练循环，从经验生成到策略更新。
 
-#### Core Components
+#### 核心组件
 
-**`SPMDPPOTrainer` / `SPMDPPOTrainerVL`** (`spmd_ppo_trainer.py`)
-- **What it does**: Main training coordinator supporting SPMD (Single Program Multiple Data) and tensor parallelism. Manages the full training loop: experience generation → advantage computation → policy/value updates → logging.
-- **Key features**:
-  - Co-location of reward models with actor on same GPUs for memory efficiency
-  - Support for both local and remote reward models (HTTP API)
-  - Automatic KL divergence monitoring and adaptive KL penalty
-  - Checkpoint saving/loading with strategy-aware state management
-  - Integration with vLLM/SGLang for fast inference
-  - Pushes updated actor weights back to rollout engine after PPO training
-- **Extension points**:
-  - Override `training_step()` to customize the training loop (e.g., add auxiliary losses)
-  - Override `training_step_actor()` / `training_step_critic()` to change actor/critic updates
-  - Extend `ppo_train()` if you need a different replay-buffer-to-update schedule
-  - Add custom logging through `save_logs_and_checkpoints()`
-  - Extend trajectory saving / checkpoint timing in `SPMDPPOTrainerBase`
+**`SPMDPPOTrainer` / `SPMDPPOTrainerVL`**（`spmd_ppo_trainer.py`）
+- **作用**：支持 SPMD（Single Program Multiple Data）和张量并行的主训练协调器。管理完整训练循环：经验生成 → advantage 计算 → 策略/价值更新 → 日志记录。
+- **关键特性**：
+  - 将奖励模型与 actor 共置在同一组 GPU 上，以提升内存效率
+  - 同时支持本地和远程奖励模型（HTTP API）
+  - 自动监控 KL 散度并施加自适应 KL 惩罚
+  - 带有策略感知状态管理的检查点保存/加载
+  - 集成 vLLM/SGLang 以实现快速推理
+  - 在 PPO 训练后将更新后的 actor 权重推回 rollout 引擎
+- **扩展点**：
+  - 重写 `training_step()` 以定制训练循环（例如添加辅助损失）
+  - 重写 `training_step_actor()` / `training_step_critic()` 以更改 actor/critic 更新
+  - 如果你需要不同的 replay-buffer 到 update 调度，可扩展 `ppo_train()`
+  - 通过 `save_logs_and_checkpoints()` 添加自定义日志
+  - 在 `SPMDPPOTrainerBase` 中扩展轨迹保存 / 检查点时机
 
-**`FastExperienceMaker`** (`fast_exp_maker.py`)
-- **What it does**: Generates rollout experiences using vLLM/SGLang inference engines. This is the real "experience pipeline" in current training. It handles:
-  - text/VLM preprocessing
-  - rollout engine generation
-  - actor/reference/critic forward passes
-  - reward model execution and aggregation
-  - KL computation
-  - reward shaping
-  - advantage/return computation
-  - final packing into `Experience` / `ExperienceVL`
-- **Key features**:
-  - Multimodal data processing (text, images, videos)
-  - Multiple reward model aggregation (weighted sum, product, min/max)
-  - FIRE sampling support for improved exploration
-  - Running reward normalization across batches
-  - Sample packing for training efficiency
-  - Shard-parallel preprocess/postprocess through `strategy.sp_data_processor`
-- **Extension points**:
-  - **Add new sampling strategies**: Modify `generate_samples()` to implement custom sampling (e.g., beam search variants, constrained decoding)
-  - **Custom reward model execution/aggregation**: Edit `RewardComputationEngine`
-  - **New reward preprocessing**: Extend `_process_experiences()`
-  - **Custom advantage computation**: Integrate new advantage calculators via `get_advantage_calculator()`
-  - **Custom model-side bookkeeping**: Extend `_preprocess_sample()` / `_pack_experience()`
+**`FastExperienceMaker`**（`fast_exp_maker.py`）
+- **作用**：使用 vLLM/SGLang 推理引擎生成 rollout 经验。这是当前训练中的真实“经验流水线”。它处理：
+  - 文本/VLM 预处理
+  - rollout 引擎生成
+  - actor/reference/critic 前向传播
+  - 奖励模型执行与聚合
+  - KL 计算
+  - 奖励塑形
+  - advantage/return 计算
+  - 最终打包为 `Experience` / `ExperienceVL`
+- **关键特性**：
+  - 多模态数据处理（文本、图像、视频）
+  - 多奖励模型聚合（加权和、乘积、最小值/最大值）
+  - 支持 FIRE sampling 以提升探索
+  - 跨 batch 的运行中奖励归一化
+  - 用于训练效率的样本 packing
+  - 通过 `strategy.sp_data_processor` 进行分片并行预处理/后处理
+- **扩展点**：
+  - **添加新的采样策略**：修改 `generate_samples()` 以实现自定义采样（例如 beam search 变体、约束解码）
+  - **自定义奖励模型执行/聚合**：编辑 `RewardComputationEngine`
+  - **新的奖励预处理**：扩展 `_process_experiences()`
+  - **自定义 advantage 计算**：通过 `get_advantage_calculator()` 集成新的 advantage 计算器
+  - **自定义模型侧记账逻辑**：扩展 `_preprocess_sample()` / `_pack_experience()`
 
-**Example: Adding a new sampling strategy**
+**示例：添加一种新的采样策略**
 ```python
-# In fast_exp_maker.py, modify generate_samples()
+# 在 fast_exp_maker.py 中，修改 generate_samples()
 def generate_samples(self, prompts, **kwargs):
-    # Your custom sampling logic
+    # 你的自定义采样逻辑
     if self.args.use_custom_sampling:
         outputs = self._custom_sampling_strategy(prompts, **kwargs)
     else:
@@ -299,312 +299,312 @@ def generate_samples(self, prompts, **kwargs):
     return outputs
 ```
 
-**`AdvantageCalculator`** (`advantage_calculator.py`)
-- **What it does**: Pluggable advantage estimation with multiple algorithms (GAE, GRPO, RLOO, REINFORCE++, CPGD).
-- **Key features**:
-  - Unified interface via abstract base class
-  - Reward preprocessing (whitening, clipping, group normalization)
-  - Support for both token-level and sequence-level advantages
-- **Extension points**:
-  - **Add new advantage methods**: Create a new class inheriting from `AdvantageCalculator` or `BaseREINFORCECalculator`
-  - Implement `preprocess_rewards()` for custom reward preprocessing
-  - Implement `compute()` for advantage/return computation
-  - Register in `get_advantage_calculator()` factory function
-  - If needed, also update `normalize_advantages_cross_batch()` behavior for your estimator
+**`AdvantageCalculator`**（`advantage_calculator.py`）
+- **作用**：支持多种算法（GAE、GRPO、RLOO、REINFORCE++、CPGD）的可插拔 advantage 估计。
+- **关键特性**：
+  - 通过抽象基类提供统一接口
+  - 奖励预处理（白化、裁剪、组归一化）
+  - 同时支持 token 级和 sequence 级 advantage
+- **扩展点**：
+  - **添加新的 advantage 方法**：创建一个继承自 `AdvantageCalculator` 或 `BaseREINFORCECalculator` 的新类
+  - 为自定义奖励预处理实现 `preprocess_rewards()`
+  - 为 advantage/return 计算实现 `compute()`
+  - 在 `get_advantage_calculator()` 工厂函数中注册
+  - 如有需要，也要更新你的估计器在 `normalize_advantages_cross_batch()` 中的行为
 
-**Example: Adding a custom advantage calculator**
+**示例：添加一个自定义 advantage 计算器**
 ```python
 class MyCustomAdvantageCalculator(BaseREINFORCECalculator):
     def compute(self, rewards, values, action_mask, **kwargs):
-        # Your custom advantage computation
+        # 你的自定义 advantage 计算
         advantages = self._my_custom_algorithm(rewards, values)
-        returns = rewards + advantages  # Example
+        returns = rewards + advantages  # 示例
         return advantages, returns
 
-# Register in get_advantage_calculator()
+# 在 get_advantage_calculator() 中注册
 def get_advantage_calculator(config):
     if config.advantage_estimator == "my_custom":
         return MyCustomAdvantageCalculator(config)
-    # ... existing cases
+    # ... 现有分支
 ```
 
-**`ReplayBuffer` / `ReplayBufferVL`** (`replay_buffer.py`, `replay_buffer_vl.py`)
-- **What it does**: Stores and samples experiences for training with optional sample packing.
-- **Important detail**: This is closer to an experience cache/rebatcher than a classic off-policy RL replay buffer.
-- **Extension points**:
-  - Override `make_experience_batch()` to customize batch construction
-  - Change `append()` / `normalize()` behavior if your algorithm needs different per-item statistics
+**`ReplayBuffer` / `ReplayBufferVL`**（`replay_buffer.py`、`replay_buffer_vl.py`）
+- **作用**：存储并采样训练经验，可选支持样本 packing。
+- **重要细节**：它更接近经验缓存/重分批器，而不是经典的离策略 RL replay buffer。
+- **扩展点**：
+  - 重写 `make_experience_batch()` 以定制 batch 构建
+  - 如果你的算法需要不同的逐项统计，可修改 `append()` / `normalize()` 行为
 
 ---
 
-### 2. Models Module (`lightrft/models/`)
+### 2. Models 模块（`lightrft/models/`）
 
-The models module provides wrappers around HuggingFace models with RLHF-specific functionality.
+Models 模块提供围绕 HuggingFace 模型的包装器，并加入 RLHF 特有功能。
 
-#### Core Components
+#### 核心组件
 
-**`ActorLanguage` / `ActorVL` / `ActorAL`** (`actor_language.py`, `actor_vl.py`, `actor_al.py`)
-- **What it does**: Wraps HuggingFace models for policy training. Computes log probabilities, handles generation, and manages modality-specific inputs.
-- **Key features**:
-  - Automatic handling of attention masks and position IDs
-  - Support for gradient checkpointing and LoRA
-  - Modality-aware parameter filtering (text-only vs. multimodal)
-  - Integration with vLLM/SGLang for inference
-  - Optional action entropy output for high-entropy token filtering
-- **Extension points**:
-  - **Add new modalities**: Create a new actor class inheriting from the base actor, define modality in `ActorModality` enum
-  - **Custom forward pass**: Override `forward()` to add auxiliary outputs (e.g., uncertainty estimates)
-  - **Custom generation**: Override `generate()` for specialized decoding strategies
-  - **Model-specific preprocessing**: Add preprocessing logic in `__init__()` or `forward()`
+**`ActorLanguage` / `ActorVL` / `ActorAL`**（`actor_language.py`、`actor_vl.py`、`actor_al.py`）
+- **作用**：为策略训练包装 HuggingFace 模型。负责计算对数概率、处理生成，以及管理特定模态的输入。
+- **关键特性**：
+  - 自动处理 attention mask 和 position ID
+  - 支持 gradient checkpointing 和 LoRA
+  - 具备模态感知的参数过滤（纯文本 vs. 多模态）
+  - 与 vLLM/SGLang 集成用于推理
+  - 可选输出 action entropy，用于高熵 token 过滤
+- **扩展点**：
+  - **添加新模态**：创建一个继承基础 actor 的新 actor 类，并在 `ActorModality` 枚举中定义该模态
+  - **自定义前向传播**：重写 `forward()` 以添加辅助输出（例如不确定性估计）
+  - **自定义生成**：重写 `generate()` 以支持专用解码策略
+  - **模型特定预处理**：在 `__init__()` 或 `forward()` 中加入预处理逻辑
 
-**Example: Adding a new modality**
+**示例：添加一种新模态**
 ```python
-# In actor_modality.py
+# 在 actor_modality.py 中
 class ActorModality(Enum):
     LANGUAGE_ONLY = "text"
     VISION_LANGUAGE = "vision"
     AUDIO_LANGUAGE = "audio"
-    MY_NEW_MODALITY = "my_modality"  # Add your modality
+    MY_NEW_MODALITY = "my_modality"  # 添加你的模态
 
 MODALITY_PARAMETERS = {
-    # ... existing mappings
+    # ... 现有映射
     ActorModality.MY_NEW_MODALITY: {
         "my_special_input",
         "my_other_input",
     },
 }
 
-# Create actor_my_modality.py
-class ActorMyModality(ActorLanguage):  # Or inherit from appropriate base
+# 创建 actor_my_modality.py
+class ActorMyModality(ActorLanguage):  # 或继承合适的基类
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.modality = ActorModality.MY_NEW_MODALITY
 
     def forward(self, sequences, attention_mask, my_special_input=None, **kwargs):
-        # Your custom forward logic
+        # 你的自定义前向逻辑
         pass
 ```
 
-**`PolicyLoss`** (`loss.py`)
-- **What it does**: Unified policy loss for actor optimization. In the current code path, the concrete implemented branches are standard PPO clipping, CPGD-style clipping, and optional entropy-mask-based token selection.
-- **Key features**:
-  - Clipped surrogate objective (PPO)
-  - Asymmetric clipping (CPGD)
-  - High-entropy token masking for efficient training
-  - Automatic clip fraction logging
-- **Extension points**:
-  - **Add new policy objectives**: Modify `forward()` to implement new clipping strategies or loss formulations
-  - **Custom masking**: Add new masking strategies beyond entropy-based filtering
-  - **Token-level vs. sequence-level**: Adjust aggregation logic for different granularities
-  - If your objective needs additional per-sample metadata, also update trainer `training_step_actor()`
+**`PolicyLoss`**（`loss.py`）
+- **作用**：用于 actor 优化的统一策略损失。在当前代码路径中，已具体实现的分支包括标准 PPO 裁剪、CPGD 风格裁剪，以及基于 entropy mask 的可选 token 选择。
+- **关键特性**：
+  - 裁剪的替代目标（PPO）
+  - 非对称裁剪（CPGD）
+  - 用于高效训练的高熵 token mask
+  - 自动记录 clip fraction
+- **扩展点**：
+  - **添加新的策略目标**：修改 `forward()` 以实现新的裁剪策略或损失形式
+  - **自定义掩码**：添加超出 entropy-based filtering 之外的新掩码策略
+  - **Token 级 vs. sequence 级**：针对不同粒度调整聚合逻辑
+  - 如果你的目标需要额外的逐样本元数据，也请同步更新 trainer 中的 `training_step_actor()`
 
-**Example: Adding a new policy loss variant**
+**示例：添加新的策略损失变体**
 ```python
-# In loss.py, modify PolicyLoss.forward()
+# 在 loss.py 中，修改 PolicyLoss.forward()
 def forward(self, log_probs, old_log_probs, advantages, action_mask, **kwargs):
     if self.use_my_custom_loss:
-        # Your custom loss computation
+        # 你的自定义损失计算
         loss = self._compute_my_custom_loss(log_probs, old_log_probs, advantages)
     else:
-        # Existing PPO/CPGD logic
+        # 现有 PPO/CPGD 逻辑
         loss = self._compute_standard_loss(...)
     return loss
 ```
 
-**Reward Models** (`srm_vl.py`, `grm_vl.py`, `srm_al.py`)
-- **What it does**: Wraps reward models for scoring generations. Supports scalar rewards (SRM) and generative rewards (GRM).
-- **Extension points**:
-  - **Add new reward model types**: Create new wrapper classes for different reward architectures
-  - **Custom reward aggregation**: Implement multi-objective reward functions
-  - **Process reward models**: Extend for token-level reward prediction (see `PRMLoss` in `loss.py`)
+**奖励模型**（`srm_vl.py`、`grm_vl.py`、`srm_al.py`）
+- **作用**：包装用于给生成结果打分的奖励模型。支持标量奖励（SRM）和生成式奖励（GRM）。
+- **扩展点**：
+  - **添加新的奖励模型类型**：为不同奖励架构创建新的包装类
+  - **自定义奖励聚合**：实现多目标奖励函数
+  - **处理式奖励模型**：扩展以支持 token 级奖励预测（参见 `loss.py` 中的 `PRMLoss`）
 
 ---
 
-### 3. Strategy Module (`lightrft/strategy/`)
+### 3. Strategy 模块（`lightrft/strategy/`）
 
-The strategy module abstracts distributed training backends (DeepSpeed, FSDP) behind a uniform API.
+Strategy 模块在统一 API 之后抽象了分布式训练后端（DeepSpeed、FSDP）。
 
-#### Core Components
+#### 核心组件
 
-**`StrategyBase`** (`strategy_base.py`)
-- **What it does**: Abstract base class defining the training strategy interface. All strategies (DeepSpeed, FSDP, FakeStrategy) implement this API.
-- **Key methods**:
-  - `prepare_model()`: Wraps model for distributed training
-  - `backward()`: Computes gradients
-  - `optimizer_step()`: Updates parameters with gradient clipping
-  - `save_ckpt()` / `load_ckpt()`: Checkpoint management
-  - `setup_inference_engine()`: Initializes vLLM/SGLang
-  - `gather_and_generate()`: gathers prompts across ranks and calls rollout engine
-  - `update_engine_weights()`: broadcasts actor weights into rollout engine
-- **Extension points**:
-  - **Add new backends**: Create a new strategy class inheriting from `StrategyBase`
-  - Implement all abstract methods for your backend
-  - Register in `get_strategy()` factory function
-  - If your backend changes rollout runtime behavior, also inspect `engine_generate_local()` / `gather_and_generate()`
+**`StrategyBase`**（`strategy_base.py`）
+- **作用**：定义训练策略接口的抽象基类。所有策略（DeepSpeed、FSDP、FakeStrategy）都实现该 API。
+- **关键方法**：
+  - `prepare_model()`：为分布式训练包装模型
+  - `backward()`：计算梯度
+  - `optimizer_step()`：带梯度裁剪地更新参数
+  - `save_ckpt()` / `load_ckpt()`：检查点管理
+  - `setup_inference_engine()`：初始化 vLLM/SGLang
+  - `gather_and_generate()`：跨 rank 聚合 prompt 并调用 rollout 引擎
+  - `update_engine_weights()`：将 actor 权重广播到 rollout 引擎中
+- **扩展点**：
+  - **添加新的后端**：创建一个继承自 `StrategyBase` 的新策略类
+  - 为你的后端实现所有抽象方法
+  - 在 `get_strategy()` 工厂函数中注册
+  - 如果你的后端会改变 rollout 运行时行为，也请检查 `engine_generate_local()` / `gather_and_generate()`
 
-**`DeepspeedStrategy`** (`deepspeed/deepspeed.py`)
-- **What it does**: DeepSpeed ZeRO (Stage 1/2/3) implementation with automatic mixed precision.
-- **Key features**: ZeRO optimizer, gradient accumulation, pipeline parallelism support
-- **Extension points**: Override `_configure_deepspeed()` to customize DeepSpeed config
+**`DeepspeedStrategy`**（`deepspeed/deepspeed.py`）
+- **作用**：带自动混合精度的 DeepSpeed ZeRO（Stage 1/2/3）实现。
+- **关键特性**：ZeRO 优化器、梯度累积、pipeline parallelism 支持
+- **扩展点**：重写 `_configure_deepspeed()` 以定制 DeepSpeed 配置
 
-**`FSDPV2Strategy`** (`fsdp/fsdpv2.py`)
-- **What it does**: PyTorch FSDP v2 implementation with flexible sharding strategies.
-- **Key features**: FULL_SHARD, HYBRID_SHARD, NO_SHARD modes; CPU offloading; mixed precision
-- **Extension points**: Override `_wrap_model()` to customize FSDP wrapping policy
+**`FSDPV2Strategy`**（`fsdp/fsdpv2.py`）
+- **作用**：带灵活分片策略的 PyTorch FSDP v2 实现。
+- **关键特性**：FULL_SHARD、HYBRID_SHARD、NO_SHARD 模式；CPU offloading；混合精度
+- **扩展点**：重写 `_wrap_model()` 以定制 FSDP 包装策略
 
-**`FakeStrategy`** (`fake_strategy.py`)
-- **What it does**: Single-process strategy for unit testing without distributed setup.
-- **Use case**: Testing trainer logic, debugging algorithms, rapid prototyping
+**`FakeStrategy`**（`fake_strategy.py`）
+- **作用**：用于单元测试的单进程策略，无需分布式环境。
+- **使用场景**：测试 trainer 逻辑、调试算法、快速原型开发
 
-**`StrategyConfig`** (`config.py`)
-- **What it does**: Typed configuration dataclass for all strategy parameters.
-- **Usage**: `config = StrategyConfig.from_args(args)` converts argparse namespace to typed config
-- **Extension points**: Add new fields for custom strategy parameters
+**`StrategyConfig`**（`config.py`）
+- **作用**：面向所有策略参数的类型化配置数据类。
+- **用法**：`config = StrategyConfig.from_args(args)` 会将 argparse namespace 转换为类型化配置
+- **扩展点**：为自定义策略参数添加新字段
 
-**Example: Adding a new training strategy**
+**示例：添加一种新的训练策略**
 ```python
-# Create strategy/my_backend/my_strategy.py
+# 创建 strategy/my_backend/my_strategy.py
 class MyCustomStrategy(StrategyBase):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Initialize your backend
+        # 初始化你的后端
 
     def prepare_model(self, model, optimizer):
-        # Wrap model with your backend
+        # 使用你的后端包装模型
         return wrapped_model, wrapped_optimizer
 
     def backward(self, loss, model, optimizer):
-        # Custom backward pass
+        # 自定义反向传播
         pass
 
-    # Implement other abstract methods...
+    # 实现其他抽象方法...
 
-# Register in strategy.py
+# 在 strategy.py 中注册
 def get_strategy(args):
     if args.use_my_backend:
         return MyCustomStrategy(...)
-    # ... existing cases
+    # ... 现有分支
 ```
 
 ---
 
-### 4. Datasets Module (`lightrft/datasets/`)
+### 4. Datasets 模块（`lightrft/datasets/`）
 
-Dataset handlers for different data formats and tasks.
+面向不同数据格式和任务的数据集处理器。
 
-#### Core Components
+#### 核心组件
 
-**`PromptDataset` / `PromptDatasetVL`** (`prompts_dataset.py`, `prompts_dataset_vl.py`)
-- **What it does**: Main training datasets for LLM and VLM respectively. Loads prompts and optional images/videos.
-- **Data format**: Expects JSON/JSONL with fields like `prompt`, `images`, `videos`, `label`, `reference`
-- **Extension points**:
-  - **Add new data formats**: Create new dataset classes inheriting from `torch.utils.data.Dataset`
-  - **Custom schema normalization**: Extend `preprocess_data(...)`
-  - **Multi-turn / chat-template behavior**: Extend prompt rendering logic in the dataset layer
-  - **Do not put reward logic here** unless it is strictly schema extraction; algorithmic reward logic belongs in trainer/experience maker
+**`PromptDataset` / `PromptDatasetVL`**（`prompts_dataset.py`、`prompts_dataset_vl.py`）
+- **作用**：分别面向 LLM 和 VLM 的主训练数据集。加载 prompt 以及可选的图像/视频。
+- **数据格式**：期望 JSON/JSONL，字段如 `prompt`、`images`、`videos`、`label`、`reference`
+- **扩展点**：
+  - **添加新的数据格式**：创建继承自 `torch.utils.data.Dataset` 的新数据集类
+  - **自定义 schema 归一化**：扩展 `preprocess_data(...)`
+  - **多轮 / chat-template 行为**：在数据集层扩展 prompt 渲染逻辑
+  - **不要在这里放奖励逻辑**，除非它严格属于 schema 提取；算法性的奖励逻辑应放在 trainer/experience maker 中
 
-**Example: Adding a custom dataset**
+**示例：添加一个自定义数据集**
 ```python
 class MyCustomDataset(PromptDataset):
     def __getitem__(self, idx):
         item = super().__getitem__(idx)
-        # Add custom preprocessing
+        # 添加自定义预处理
         item['prompt'] = self._my_custom_transform(item['prompt'])
         return item
 ```
 
 ---
 
-### 5. Utils Module (`lightrft/utils/`)
+### 5. Utils 模块（`lightrft/utils/`）
 
-Utility functions and helpers.
+工具函数与辅助组件。
 
-#### Key Components
+#### 关键组件
 
-**`cli_args.py`**: Centralized CLI argument definitions. Call `add_arguments(parser)` to add all framework args to your argparse parser.
+**`cli_args.py`**：集中式 CLI 参数定义。调用 `add_arguments(parser)` 以将所有框架参数添加到你的 argparse parser 中。
 
-**`remote_rm_utils.py`**: Utilities for calling remote reward model HTTP APIs. Useful for large reward models that don't fit on training GPUs.
+**`remote_rm_utils.py`**：用于调用远程奖励模型 HTTP API 的工具函数。适合那些无法放入训练 GPU 的大型奖励模型。
 
-**`trajectory_saver.py`**: Saves rollout trajectories (prompts, generations, rewards) for offline analysis and debugging.
+**`trajectory_saver.py`**：保存 rollout 轨迹（prompts、generations、rewards），用于离线分析与调试。
 
-**`processor.py`**: Unified wrapper for HuggingFace tokenizers and processors (handles both text-only and multimodal).
-
----
-
-## Common Extension Scenarios
-
-### Scenario 1: Adding a New RL Algorithm (e.g., GRPO variant)
-
-1. **Advantage computation**: Create new calculator in `advantage_calculator.py`
-2. **Policy loss**: Add loss variant in `loss.py` → `PolicyLoss.forward()`
-3. **Reward preprocessing / shaping**: Modify `FastExperienceMaker._process_experiences()` or `_compute_advantages_and_returns()`
-4. **CLI args**: Add algorithm-specific flags in your training script
-5. **Config plumbing**: Add the new fields to `StrategyConfig` if the fast path reads them from `self.strategy.config`
-6. **Test**: Use `FakeStrategy` for single-process testing
-
-### Scenario 2: Adding a New Model Architecture
-
-1. **Actor wrapper**: Create `actor_my_model.py` inheriting from `ActorLanguage` or `ActorVL`
-2. **Modality definition**: Add to `ActorModality` enum if new modality
-3. **Parameter routing**: Update modality-based extra-kwarg routing in `fast_exp_maker.py`
-4. **Processor**: Ensure tokenizer/processor is compatible in `utils/processor.py`
-5. **Monkey patches**: Add any model-specific patches in `models/monkey_patch/`
-6. **Test**: Write unit tests in `models/tests/`
-
-### Scenario 3: Adding a New Distributed Backend
-
-1. **Strategy class**: Create new strategy inheriting from `StrategyBase`
-2. **Implement interface**: All abstract methods (prepare, backward, optimizer_step, save/load)
-3. **Register**: Add to `get_strategy()` factory in `strategy.py`
-4. **Config**: Add backend-specific args to `StrategyConfig`
-5. **Test**: Verify with multi-GPU setup
-
-### Scenario 4: Custom Reward Function
-
-1. **Local reward model**: Create wrapper in `models/` (e.g., `my_reward_model.py`)
-2. **Remote reward model**: Implement HTTP endpoint, use `remote_rm_utils.py`
-3. **Integration**: Pass reward model / `reward_fn` / label map / recipe to trainer
-4. **Aggregation**: Modify `RewardComputationEngine._aggregate_rewards()`
-5. **If needed**: Add post-reward shaping in `_process_experiences()`
-
-### Scenario 5: New Sampling Strategy (e.g., Constrained Decoding)
-
-1. **Modify generation**: Edit `FastExperienceMaker.generate_samples()`
-2. **vLLM/SGLang config**: Add sampling parameters to inference engine setup
-3. **CLI args**: Add flags for your sampling strategy
-4. **Test**: Verify generation quality with small model
+**`processor.py`**：统一的 HuggingFace tokenizer 和 processor 包装器（同时处理纯文本与多模态）。
 
 ---
 
-## Debugging Tips
+## 常见扩展场景
 
-- **Use `FakeStrategy`**: Test trainer logic without distributed setup
-- **Enable trajectory saving**: Set `--save_trajectory` to inspect rollouts
-- **Check reward distributions**: Monitor reward stats in logs
-- **Gradient norms**: Watch for exploding/vanishing gradients
-- **KL divergence**: Ensure KL stays within reasonable bounds (< 0.5 typically)
-- **Advantage whitening**: Verify advantages are normalized (mean ≈ 0, std ≈ 1)
-- **Verify engine sync**: If rollouts look stale after training, check whether `update_engine_weights()` is being reached
-- **Check `StrategyConfig`**: If a new flag seems ignored, confirm it exists in `strategy/config.py`
-- **For VLM issues**: Inspect image-token / pixel-value consistency checks in `ppo_trainer_vl.py` and `fast_exp_maker.py`
+### 场景 1：添加新的 RL 算法（例如 GRPO 变体）
+
+1. **Advantage 计算**：在 `advantage_calculator.py` 中创建新的计算器
+2. **策略损失**：在 `loss.py` → `PolicyLoss.forward()` 中添加损失变体
+3. **奖励预处理 / 塑形**：修改 `FastExperienceMaker._process_experiences()` 或 `_compute_advantages_and_returns()`
+4. **CLI 参数**：在你的训练脚本中添加算法专用 flag
+5. **配置打通**：如果快速路径会从 `self.strategy.config` 读取新字段，则将这些字段添加到 `StrategyConfig`
+6. **测试**：使用 `FakeStrategy` 进行单进程测试
+
+### 场景 2：添加新的模型架构
+
+1. **Actor 包装器**：创建继承自 `ActorLanguage` 或 `ActorVL` 的 `actor_my_model.py`
+2. **模态定义**：如果是新模态，则添加到 `ActorModality` 枚举中
+3. **参数路由**：更新 `fast_exp_maker.py` 中按模态划分的额外 kwarg 路由
+4. **Processor**：确保 `utils/processor.py` 中 tokenizer/processor 兼容
+5. **Monkey patch**：在 `models/monkey_patch/` 中添加任何模型特定补丁
+6. **测试**：在 `models/tests/` 中编写单元测试
+
+### 场景 3：添加新的分布式后端
+
+1. **Strategy 类**：创建继承自 `StrategyBase` 的新策略
+2. **实现接口**：实现所有抽象方法（prepare、backward、optimizer_step、save/load）
+3. **注册**：添加到 `strategy.py` 中的 `get_strategy()` 工厂
+4. **配置**：将后端特定参数添加到 `StrategyConfig`
+5. **测试**：在多 GPU 环境中验证
+
+### 场景 4：自定义奖励函数
+
+1. **本地奖励模型**：在 `models/` 中创建包装器（例如 `my_reward_model.py`）
+2. **远程奖励模型**：实现 HTTP 端点，使用 `remote_rm_utils.py`
+3. **集成**：将奖励模型 / `reward_fn` / label map / recipe 传给 trainer
+4. **聚合**：修改 `RewardComputationEngine._aggregate_rewards()`
+5. **如有需要**：在 `_process_experiences()` 中加入奖励后的塑形
+
+### 场景 5：新的采样策略（例如约束解码）
+
+1. **修改生成**：编辑 `FastExperienceMaker.generate_samples()`
+2. **vLLM/SGLang 配置**：向推理引擎设置中添加采样参数
+3. **CLI 参数**：为你的采样策略添加 flag
+4. **测试**：用小模型验证生成质量
 
 ---
 
-## Performance Optimization
+## 调试提示
 
-- **Sample packing**: Enable with `--packing_samples` for variable-length sequences
-- **vLLM/SGLang**: Use for 2-5x faster inference vs. HuggingFace
-- **Gradient checkpointing**: Enable with `--gradient_checkpointing` to reduce memory
-- **Mixed precision**: Use `--bf16` or `--fp16` for faster training
-- **Co-located reward models**: Set `--colocate_reward_model` to save GPU memory
-- **Batch size tuning**: Increase `--rollout_batch_size` and `--micro_train_batch_size` until OOM
+- **使用 `FakeStrategy`**：在无需分布式环境的情况下测试 trainer 逻辑
+- **启用轨迹保存**：设置 `--save_trajectory` 以检查 rollout
+- **检查奖励分布**：在日志中监控奖励统计信息
+- **梯度范数**：关注梯度爆炸/消失
+- **KL 散度**：确保 KL 保持在合理范围内（通常 < 0.5）
+- **Advantage 白化**：验证 advantage 已归一化（均值 ≈ 0，标准差 ≈ 1）
+- **验证引擎同步**：如果训练后 rollout 看起来仍然很旧，检查是否执行到了 `update_engine_weights()`
+- **检查 `StrategyConfig`**：如果某个新 flag 看起来被忽略了，请确认它已存在于 `strategy/config.py` 中
+- **对于 VLM 问题**：检查 `ppo_trainer_vl.py` 和 `fast_exp_maker.py` 中 image-token / pixel-value 一致性检查
 
 ---
 
-## Testing Your Extensions
+## 性能优化
 
-1. **Unit tests**: Add tests in appropriate `tests/` directory
-2. **Integration test**: Run small-scale training (1 GPU, 100 steps)
-3. **Convergence test**: Verify algorithm converges on toy task (e.g., GSM8K subset)
-4. **Scaling test**: Test multi-GPU setup with your extension
-5. **Benchmark**: Compare performance vs. baseline implementation
+- **样本 packing**：对变长序列启用 `--packing_samples`
+- **vLLM/SGLang**：相较 HuggingFace，可获得 2-5 倍更快的推理
+- **Gradient checkpointing**：启用 `--gradient_checkpointing` 以减少内存占用
+- **混合精度**：使用 `--bf16` 或 `--fp16` 以提升训练速度
+- **奖励模型共置**：设置 `--colocate_reward_model` 以节省 GPU 内存
+- **批大小调优**：增大 `--rollout_batch_size` 和 `--micro_train_batch_size` 直到 OOM
+
+---
+
+## 测试你的扩展
+
+1. **单元测试**：在合适的 `tests/` 目录中添加测试
+2. **集成测试**：运行小规模训练（1 张 GPU，100 步）
+3. **收敛测试**：验证算法能在玩具任务上收敛（例如 GSM8K 子集）
+4. **扩展性测试**：使用你的扩展测试多 GPU 环境
+5. **基准测试**：与基线实现比较性能
