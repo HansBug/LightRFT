@@ -1,287 +1,187 @@
 <div align="center">
 
-# SafeWork-R1 训练代码
+# LightRFT 中的 Math PRM 训练
 
-SafeWork-R1 模型的官方训练代码实现，采用 SafeLadder 框架。
-
-[🤗Huggingface 模型](https://huggingface.co/collections/AI45Research/safework-r1) • [📜技术报告](https://arxiv.org/abs/2507.18576) • [💬在线体验](https://safework-r1.ai45.shlab.org.cn/)
+URSA-MATH Stage 3 PS-GRPO 训练迁移到 LightRFT 的实现目录。
 
 </div>
 
 ## 概述
 
-本仓库包含 **SafeWork-R1** 的官方训练代码，SafeWork-R1 是一个前沿的多模态推理模型，展示了在 AI-45° 法则指导下安全性与通用智能的协同演化。
+这个目录现在是实际使用中的 `math_prm` 工作目录，目标不是通用 SafeWork 示例，而是当前这条链路：
 
-训练实现基于 **SafeLadder 框架**，具有以下特点：
-- **多阶段强化学习**流程，具有渐进式安全对齐
-- **多原则验证器**（Safety、Value、Knowledge）提供稳健的奖励信号
-- **组相对策略优化（GRPO）**实现高效训练
-- **协同部署的奖励模型**进行多维度评估
+- actor：`URSA-8B`
+- reward model：`URSA-RM-8B`
+- 算法：GRPO / PS-GRPO 风格在线强化学习
+- 原始数据：`MMathCoT-1M`
+- 训练数据 schema：`prompt / images / reference / label`
 
-## 核心特性
+## 运行时基线
 
-### 训练能力
+运行时基线由 `/data/LightRFT/Dockerfile` 冻结。
 
-- ✅ **多模态支持**：同时支持纯文本和视觉语言模型（Qwen2.5-VL、InternVL3、DeepSeek-R1）
-- ✅ **多个奖励模型**：Value、Safety、Knowledge、Normal 和 General 验证器
-- ✅ **灵活的分布式训练**：支持 DeepSpeed ZeRO（Stage 1/2/3）和 PyTorch FSDP
-- ✅ **推理引擎**：集成 vLLM 和 SGLang 实现高效生成
-- ✅ **内存优化**：梯度检查点、CPU 卸载
-- ✅ **高级技术**：例如 DAPO（动态采样和超长缓冲区惩罚）
+- Dockerfile 里已经安装的 pip 包版本不要擅自改。
+- 不要把升级或降级 `torch`、`deepspeed`、`vllm`、`flash_attn`、`sglang` 当成常规修复手段。
+- 优先从代码、数据转换、训练参数三层排查问题。
 
-### SafeLadder 框架
+## 目录说明
 
-训练遵循 SafeLadder 多阶段流程：
-
-1. **CoT-SFT**：思维链监督微调
-2. **M³-RL**：多原则多模型多轮强化学习
-3. **Safe-and-Efficient RL**：安全性聚焦优化与效率约束
-4. **Deliberative Search RL**：带有搜索机制的步骤级验证
-
-本仓库主要完成第2部分 **M³-RL**：多原则多模型多轮强化学习 的内容。
-
-## 项目结构
-
-```
-safework_t1/
-├── train_colocate.py              # GRPO 与协同部署奖励模型的主训练脚本
-├── reward_models.py               # 奖励模型实现（Value、Safety、Knowledge）
-├── reward_models_utils.py         # 加载和管理奖励模型的工具函数
-├── test_reward_models.py          # 奖励模型测试脚本
-├── run_grpo_kg_qwenvl.sh         # Knowledge + General 奖励模型训练脚本（Qwen2.5-VL）
-├── run_grpo_svki_fsdp_deepseek.sh # Safety + Value + Knowledge 训练脚本（DeepSeek-70B）
-└── run_grpo_svkng_fsdp_qwenvl.sh # 全部奖励模型训练脚本（Qwen2.5-VL）
+```text
+examples/math_prm/
+├── prepare_ursa_stage3_manifest.py   # 把 URSA raw jsonl 转成 LightRFT prompt manifest
+├── train_colocate.py                 # 主训练入口
+├── run_grpo_math_prm_ursa_8b.sh      # URSA-8B + URSA-RM-8B 训练脚本
+├── reward_models.py                  # reward 实现，含 MathPRMReward
+├── reward_models_utils.py            # reward model 加载与路由
+├── prm_infer_score.py                # step-level PRM 打分逻辑
+├── test_reward_models.py             # reward 侧测试
+├── URSA_MIGRATION.md                 # 从 URSA-MATH 迁移过来的说明
+└── ursa_model/                       # 自包含的 URSA 模型代码
 ```
 
-## 安装
+## 本机资源路径
 
-### 前置要求
-
-- Python >= 3.8
-- CUDA >= 11.8（用于 GPU 训练）
-- 推荐 8x A100 (80GB) 或同等规格 GPU
-
-### 环境配置
-
-1. **克隆仓库**：
-```bash
-git clone https://github.com/AI45Research/SafeWork-R1.git
-cd SafeWork-R1/training_code
-
-```
-
-2. **安装依赖**：
-```bash
-# 安装核心训练框架
-pip install lightrft
-
-```
-
-
-## 快速开始
-
-### 1. 准备训练数据
-
-请在训练脚本中修改 DATA_PATH 指向您的数据集目录。
-
-### 2. 准备奖励模型 和 SFT模型
-
-下载 SafeWork-R1 奖励模型：
-- [SafeWork-RM-Safety-7B](https://huggingface.co/AI45Research/SafeWork-RM-Safety-7B)
-- [SafeWork-RM-Value-72B](https://huggingface.co/AI45Research/SafeWork-RM-Value-72B)
-- [SafeWork-RM-Knowledge-72B](https://huggingface.co/AI45Research/SafeWork-RM-Knowledge-72B)
-
-
-### 3. 运行训练
-
-#### 选项 A：使用 Qwen2.5-VL-7B 快速开始
+当前机器上的关键资源路径如下：
 
 ```bash
-bash run_grpo_kg_qwenvl.sh
+URSA actor:      /home/ubuntu/URSA-MATH/checkpoints/URSA-8B
+URSA reward:     /home/ubuntu/URSA-MATH/checkpoints/URSA-RM-8B
+MMathCoT-1M raw: /home/ubuntu/URSA-MATH/datasets/URSA-MATH/MMathCoT-1M/train.jsonl
+Image root:      /home/ubuntu/URSA-MATH/datasets/URSA-MATH/images
 ```
 
-该脚本使用 Knowledge 和 General 奖励模型训练 Qwen2.5-VL-7B 模型。
-
-#### 选项 B：使用全部验证器训练（Qwen2.5-VL）
+Phase 1 生成好的转换结果在：
 
 ```bash
-bash run_grpo_svkng_fsdp_qwenvl.sh
+/data/LightRFT/tmp/ursa_stage3/mmathcot_stage3_math_prm.jsonl
 ```
 
-该脚本使用所有奖励模型（Safety、Value、Knowledge、Normal、General）进行全面对齐。
-
-#### 选项 C：DeepSeek-R1-70B 训练
+对应 summary 在：
 
 ```bash
-bash run_grpo_svki_fsdp_deepseek.sh
+/data/LightRFT/tmp/ursa_stage3/mmathcot_stage3_math_prm.summary.json
 ```
 
-该脚本使用 Safety、Value 和 Knowledge 验证器训练 DeepSeek-R1-Distill-Llama-70B 模型。
+## 数据准备
 
-### 4. 监控训练
+### 原始 schema
 
-训练日志和检查点将保存到脚本中指定的输出目录。您可以通过以下方式监控训练进度：
-- **Weights & Biases**：如果配置了 wandb 将自动记录
-- **控制台日志**：训练损失、奖励分数、KL 散度
-- **检查点文件**：定期保存的模型状态
+URSA 的 raw Stage 3 数据不能直接喂给 `PromptDatasetVL`。raw schema 是：
 
-## 配置
-
-### 关键训练参数
-
-编辑训练脚本以自定义这些参数：
-
-```bash
-# 强化学习训练参数
-N_SAMPLES=8          # 每个提示词生成的响应数量
-EPISODE=3            # 总训练轮数
-LR=1e-6              # 学习率
-MAX_LENGTH=8192      # 最大序列长度
-
-# 批次大小
-TBS=32               # 总训练批次大小
-RBS=64               # 总rollout批次大小
-
-# 奖励模型权重
-RM_VALUE_WEIGHT=1.0      # Value 验证器权重
-RM_SAFETY_WEIGHT=1.0     # Safety 验证器权重
-RM_KNOWLEDGE_WEIGHT=1.0  # Knowledge 验证器权重
-```
-
-### 分布式训练策略
-
-**DeepSpeed ZeRO**：
-```bash
---zero_stage 2 \           # ZeRO 优化阶段（1/2/3）
---bf16 \                   # 使用 BF16 混合精度
---gradient_checkpointing   # 启用梯度检查点
-```
-
-**PyTorch FSDP**：
-```bash
---fsdp \                   # 启用 FSDP 模式
---bf16 \                   # 使用 BF16 混合精度
---gradient_checkpointing   # 启用梯度检查点
-```
-
-### 奖励模型配置
-
-在 `reward_models_utils.py` 中指定奖励模型或通过命令行配置：
-
-```python
-RECIPE = {
-    "value": {
-        "path": "AI45Research/SafeWork-RM-Value-72B",
-        "weight": 1.0,
-        "use_engine": False  # 使用 HF 推理（True 表示 SGLang）
-    },
-    "safety": {
-        "path": "AI45Research/SafeWork-RM-Safety-7B",
-        "weight": 1.0,
-        "use_engine": True   # 使用 SGLang 加速推理
-    },
-    # ... 更多奖励模型
+```json
+{
+  "image_url": "...",
+  "instruction": "...",
+  "output": "..."
 }
 ```
 
-## 高级用法
+LightRFT 训练期望的最小 schema 是：
 
-### 自定义奖励模型
-
-添加您自己的奖励模型：
-
-1. **在 `reward_models.py` 中实现奖励模型类**：
-```python
-class MyCustomRM(nn.Module):
-    def forward(self, input_ids, attention_mask, **kwargs):
-        # 您的奖励计算逻辑
-        return scores
-```
-
-2. **在 reward_models_utils.py 中注册**：
-```python
-RECIPE["custom"] = {
-    "path": "path/to/your/model",
-    "weight": 1.0,
-    "class": "MyCustomRM"
+```json
+{
+  "prompt": "...",
+  "images": ["/abs/path/to/image.png"],
+  "reference": "...",
+  "label": "math_prm"
 }
 ```
 
-3. **更新训练脚本**以包含您的奖励模型。
+### 使用 `prepare_ursa_stage3_manifest.py`
 
+先做小样本 smoke：
 
-## 已训练模型
-
-使用本训练代码，我们成功训练了以下 SafeWork-R1 模型：
-
-| 模型 | 基础模型 | 参数量 | 链接 |
-|------|----------|--------|------|
-| SafeWork-R1 | Qwen2.5-VL-72B | 72B | [🤗 HF](https://huggingface.co/AI45Research/SafeWork-R1) |
-| SafeWork-R1-InternVL3-78B | InternVL3-78B | 78B | [🤗 HF](https://huggingface.co/AI45Research/SafeWork-R1-InternVL3-78B) |
-| SafeWork-R1-DeepSeek-70B | DeepSeek-R1-Distill-Llama-70B | 70B | [🤗 HF](https://huggingface.co/AI45Research/SafeWork-R1-DeepSeek-70B) |
-| SafeWork-R1-Qwen2.5VL-7B | Qwen2.5-VL-7B | 7B | [🤗 HF](https://huggingface.co/AI45Research/SafeWork-R1-Qwen2.5VL-7B) |
-
-## 故障排除
-
-### 常见问题
-
-1. **CUDA 内存不足**
-   - 减少批次大小（`TBS`、`RBS`）
-   - 启用梯度检查点
-   - 使用 DeepSpeed ZeRO-3 或 FSDP CPU 卸载
-   - 减少 `MAX_LENGTH`
-
-2. **奖励模型加载错误**
-   - 验证奖励模型路径是否正确
-   - 确保有足够的 GPU 内存容纳所有奖励模型
-   - 使用 `--rm_use_engine` 将奖励模型卸载到 SGLang
-
-3. **训练速度慢**
-   - 为奖励模型启用 SGLang 引擎（`use_engine: True`）
-   - 使用 vLLM 加速生成
-   - 如果内存允许，增加批次大小
-   - 检查数据加载的网络带宽
-
-4. **Wandb 上传失败**
-   - 如果在防火墙后面，配置代理设置
-   - 使用 `--wandb_mode offline` 进行离线日志记录
-   - 检查 wandb API key：`wandb login`
-
-## 性能优化建议
-
-- **使用混合精度（BF16）**在 A100/H100 GPU 上加速训练
-- **启用 flash attention**（如果您的模型支持）
-- **使用 SGLang 引擎**处理奖励模型以减少推理开销
-- **调整梯度累积**以最大化 GPU 利用率
-- **分析您的训练**以识别瓶颈
-
-## 引用
-
-如果您使用本训练代码，请引用：
-
-```bibtex
-@misc{lab2025safework,
-  title={SafeWork-R1: Coevolving Safety and Intelligence under the AI-45 Law},
-  author={Lab, Shanghai AI and Bao, Yicheng and Chen, Guanxu and Chen, Mingkang and Chen, Yunhao and Chen, Chiyu and Chen, Lingjie and Chen, Sirui and Chen, Xinquan and Cheng, Jie and others},
-  journal={arXiv preprint arXiv:2507.18576},
-  year={2025}
-}
+```bash
+python examples/math_prm/prepare_ursa_stage3_manifest.py \
+  --max-samples 32 \
+  --output-path /data/LightRFT/tmp/ursa_stage3/smoke_manifest.jsonl \
+  --summary-path /data/LightRFT/tmp/ursa_stage3/smoke_manifest.summary.json
 ```
+
+直接跑全量转换：
+
+```bash
+python examples/math_prm/prepare_ursa_stage3_manifest.py
+```
+
+关键参数：
+
+- `--input-path`：原始 `MMathCoT-1M` jsonl
+- `--image-root`：解析 `image_url` 时使用的图片根目录
+- `--output-path`：转换后 manifest 路径
+- `--summary-path`：统计结果路径
+- `--label`：默认 `math_prm`
+- `--prompt-mode question_only|instruction`：默认 `question_only`
+- `--max-samples`：只处理前 N 条，适合 smoke
+- `--smoke-samples`：转换完之后拿前 N 条做 `PromptDatasetVL` 校验
+
+这个脚本会完成三件事：
+
+1. 把 `instruction` 转成 `prompt`
+2. 把 `image_url` 展开成 URSA 图片树下的绝对路径
+3. 把 `output` 里 `†Answer:` 后面的最终答案提取成 `reference`
+
+同时它会对缺图直接 fail fast，并执行一次轻量级 dataset/collate 校验。
+
+## 训练方法
+
+先把 `examples/math_prm/run_grpo_math_prm_ursa_8b.sh` 里的变量改成正确路径。对当前机器，预期值是：
+
+```bash
+PATH_TO_YOUR_BASE_MODEL="/home/ubuntu/URSA-MATH/checkpoints/URSA-8B"
+PATH_TO_URSA_RM="/home/ubuntu/URSA-MATH/checkpoints/URSA-RM-8B"
+PATH_TO_YOUR_MATH_DATASET="/data/LightRFT/tmp/ursa_stage3/mmathcot_stage3_math_prm.jsonl"
+```
+
+然后执行：
+
+```bash
+bash examples/math_prm/run_grpo_math_prm_ursa_8b.sh
+```
+
+这个训练脚本已经接好了：
+
+- `--pretrain` 指向 URSA actor
+- `--reward_pretrain` 指向 URSA reward model
+- `--prompt_data` 指向转换后的 manifest
+- `--images_key images`
+- `--label_key label`
+- `--apply_chat_template`
+
+`train_colocate.py` 里 `reference_key` 默认就是 `reference`，所以当前生成出的 manifest 可以直接用。
+
+## Label 语义
+
+- `math_prm`：只走 PRM reward
+- `math_prm_combined`：PRM + 规则正确率 reward
+
+当前 Phase 0 和 Phase 1 默认仍然使用 `math_prm`。
+
+## 输出格式要求
+
+URSA PRM 依赖 actor 输出保持下面这个格式：
+
+```text
+Step 1: ...
+Step 2: ...
+...
+†Answer: ...
+```
+
+不要改成普通段落式 CoT。PRM 打分要靠 step 边界。
+
+## 常见错误
+
+- 直接把 raw `MMathCoT-1M/train.jsonl` 当成 `--prompt_data`：这是错误用法，必须先转换。
+- 转换时遇到缺图：`prepare_ursa_stage3_manifest.py` 直接抛 `FileNotFoundError`，这是预期行为。
+- rollout 后 reward 异常或全零：先检查模型输出里是否还保留 `Step N:` 和 `†Answer:`。
+- 环境漂移：如果问题来自包版本变动，应恢复 Dockerfile 基线，而不是继续在文档和脚本里适配漂移环境。
+
+## 相关文档
+
+- [`../../plan/MATH_PRM.md`](../../plan/MATH_PRM.md)
+- [`./URSA_MIGRATION.md`](./URSA_MIGRATION.md)
 
 ## 许可证
 
 本项目采用 Apache 2.0 许可证。详见 [LICENSE](../../LICENSE)。
-
-## 致谢
-
-- 基于 [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF) 开发的。我们向 OpenRLHF 团队的杰出工作表示衷心的感谢。本项目中的部分文件和实现是从 OpenRLHF 改编和复用的。
-- SafeLadder 框架建立在安全 RLHF 和多原则对齐研究的基础上
-- 我们感谢开源社区提供的 DeepSpeed、FSDP、vLLM 和 SGLang
-- 特别感谢 Qwen、InternVL 和 DeepSeek 团队提供的优秀基础模型
-
-## 联系方式
-
-如有问题或反馈：
-- 在 [GitHub](https://github.com/AI45Research/SafeWork-R1/issues) 上提交 issue
-- 访问我们的[项目页面](https://safework-r1.ai45.shlab.org.cn/)
-- 查看[技术报告](https://arxiv.org/abs/2507.18576)

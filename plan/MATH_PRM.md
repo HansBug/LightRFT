@@ -265,6 +265,99 @@ PATH_TO_YOUR_MATH_DATASET="/path/to/converted_lightrft_stage3_manifest.jsonl"
 - 不是 raw `MMathCoT-1M/train.jsonl`
 - 也不是 `DualMath-1.1M/train.jsonl`
 
+#### 2.5.5 `prepare_ursa_stage3_manifest.py` 使用指南
+
+当前仓库里已经补上了专门的转换脚本：
+
+- 脚本路径：`/data/LightRFT/examples/math_prm/prepare_ursa_stage3_manifest.py`
+- 作用：把 URSA raw `image_url / instruction / output` 转成 LightRFT 可直接训练的 `prompt / images / reference / label`
+- 附加动作：脚本会同步做一次 `PromptDatasetVL` smoke 校验，避免只生成文件、不验证载入
+
+默认输入输出
+
+- raw 输入：`/home/ubuntu/URSA-MATH/datasets/URSA-MATH/MMathCoT-1M/train.jsonl`
+- 图片根目录：`/home/ubuntu/URSA-MATH/datasets/URSA-MATH/images`
+- 默认输出 manifest：`/data/LightRFT/tmp/ursa_stage3/mmathcot_stage3_math_prm.jsonl`
+- 默认 summary：`/data/LightRFT/tmp/ursa_stage3/mmathcot_stage3_math_prm.summary.json`
+
+脚本生成后的单条样本结构如下：
+
+```json
+{
+  "data_source": "URSA-MATH/MMathCoT-1M",
+  "prompt": "...",
+  "images": [
+    "/home/ubuntu/URSA-MATH/datasets/URSA-MATH/images/..."
+  ],
+  "reference": "...",
+  "ground_truth": "...",
+  "label": "math_prm",
+  "reward_model": {
+    "ground_truth": "..."
+  },
+  "extra_info": {
+    "source_index": 0,
+    "raw_image_url": "...",
+    "image_prefix": "...",
+    "prompt_mode": "question_only"
+  }
+}
+```
+
+最常用的两种跑法如下。
+
+先做小样本 smoke：
+
+```bash
+python examples/math_prm/prepare_ursa_stage3_manifest.py \
+  --max-samples 32 \
+  --output-path /data/LightRFT/tmp/ursa_stage3/smoke_manifest.jsonl \
+  --summary-path /data/LightRFT/tmp/ursa_stage3/smoke_manifest.summary.json
+```
+
+直接做全量转换：
+
+```bash
+python examples/math_prm/prepare_ursa_stage3_manifest.py
+```
+
+当前脚本的关键参数含义需要明确：
+
+- `--input-path`：原始 `MMathCoT-1M` jsonl 路径
+- `--image-root`：`image_url` 对应的图片根目录
+- `--output-path`：输出的 LightRFT manifest 路径
+- `--summary-path`：输出的统计与校验 summary 路径
+- `--label`：写入 manifest 的样本标签，当前默认是 `math_prm`
+- `--prompt-mode`：
+  - `question_only`：从 raw `instruction` 中抽题面，当前默认用这个
+  - `instruction`：保留整个 raw instruction
+- `--max-samples`：只转换前 N 条，适合 smoke
+- `--smoke-samples`：转换完成后，拿前 N 条做 `PromptDatasetVL` dataset/collate 校验
+
+转换后的产物应该这样接入训练：
+
+```bash
+PATH_TO_YOUR_BASE_MODEL="/home/ubuntu/URSA-MATH/checkpoints/URSA-8B"
+PATH_TO_URSA_RM="/home/ubuntu/URSA-MATH/checkpoints/URSA-RM-8B"
+PATH_TO_YOUR_MATH_DATASET="/data/LightRFT/tmp/ursa_stage3/mmathcot_stage3_math_prm.jsonl"
+```
+
+然后把最后一个路径传给：
+
+- `examples/math_prm/run_grpo_math_prm_ursa_8b.sh` 里的 `PATH_TO_YOUR_MATH_DATASET`
+- 或者直接传给 `train_colocate.py` 的 `--prompt_data`
+
+这几个使用注意点必须写清楚：
+
+- 不允许把 raw `MMathCoT-1M/train.jsonl` 直接拿去做 `--prompt_data`
+- 如果脚本发现缺图，会直接抛 `FileNotFoundError`，这是预期行为，不是可忽略 warning
+- 当前默认 `label=math_prm`，意味着 reward 走 PRM-only 路径；如果要做混合 reward，再显式改 label
+- 当前默认 `reference` 已经从 raw `output` 里的 `†Answer:` 抽出，可直接供 reward 侧使用
+- 后续如果只改数据和脚本参数即可解决问题，就不要碰 `/data/LightRFT/Dockerfile` 中冻结的 pip 依赖版本
+- 当前 Phase 1 已经实际跑通过一次全量转换，生成文件就是：
+  - `/data/LightRFT/tmp/ursa_stage3/mmathcot_stage3_math_prm.jsonl`
+  - `/data/LightRFT/tmp/ursa_stage3/mmathcot_stage3_math_prm.summary.json`
+
 ---
 
 ## 3. 当前仓库已有基础
