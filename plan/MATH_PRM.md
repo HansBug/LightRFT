@@ -683,6 +683,41 @@ Checklist：
 - 这一阶段允许 reward 先保持“基础版 math_prm”
 - 目标是先验证主链路可运行、日志可观测、显存和吞吐行为可接受
 
+Phase 3 的试跑边界需要额外固定为：
+
+- 允许直接启动 `bash examples/math_prm/run_grpo_math_prm_ursa_8b.sh`
+- 但第一次以及后续每次“链路验证型”试跑，都必须是 **time-boxed smoke run**，不能无边界长时间挂在 GPU 上观察
+- 默认 wall-clock 上限设为 `20` 分钟；如果在这之前已经出现明确报错，或已经拿到足够判断链路是否健康的首批训练日志，则应立即停止，不继续空耗 GPU
+- 这里“足够判断趋势是否正常”的最小观察目标包括：
+  - dataloader 正常起批
+  - actor rollout 正常返回
+  - reward 正常产生且不是大面积常数
+  - trainer 正常打印至少一轮可读日志（如 reward / kl / response length / loss 等）
+  - 没有立即出现 OOM、死锁、hang 住、图像载入失败、reward 全零等结构性错误
+- 这里还需要明确一条判断原则：
+  - **不能只看“训练脚本没炸”**
+  - 还必须显式观察训练过程中的关键 metrics，判断它们是不是在朝“基本正常”的方向前进，而不是虽然还能跑日志、但 reward / kl / loss / response format / response length 已经明显异常
+- Phase 3 smoke run 中至少应重点观察以下 metrics 及其变化趋势：
+  - `reward`：不能长时间恒为单一常数，也不能大面积塌成全 `0` / 全 `1`
+  - `kl`：不能从一开始就异常飙高到明显失控，也不能完全异常为 `0`
+  - `response_length` / `total_length`：不能大面积异常过短、空响应、或持续顶满长度上限
+  - `loss`：应为有限值，不能持续 `nan` / `inf`，也不能一开始就明显爆炸
+  - 生成格式质量：`Step N:` / `†Answer:` 不能大面积丢失
+  - 如日志中可见：`grad_norm` / `clip_ratio` / `advantage` / `reward std` 等，也应确认没有明显异常塌缩或爆炸
+- 如果观察到的情况是：
+  - 脚本虽然还在跑，但 metrics 明显异常
+  - 或 metrics 没有朝正常区间收敛，而是在持续恶化
+  - 或 rollout 输出已经明显偏离预期格式
+  那么本次 smoke run 仍应判定为 **失败**，不能因为“训练没崩”就把它算作 Phase 3 通过
+- 也就是说，Phase 3 的第一次运行目标不是“尽量多跑”，而是“在严格时间边界内确认主链路是否健康”
+
+Phase 3 smoke run 的退出与清理要求也需要固定为：
+
+- 一旦达到时间上限、确认趋势正常、或出现报错，必须立即结束本次试跑
+- 结束后必须清理本次试跑拉起的全部相关进程，避免残留 `torchrun`、`python` 子进程、rollout engine、reward model 进程继续占用 GPU
+- 清理完成后必须再确认一次 GPU 已释放，再进行下一轮修改或下一次试跑
+- 如果后续需要更长时间观察，也应在 Phase 3 smoke run 通过后，再显式发起第二轮“更长时长试跑”，而不是把第一次链路验证直接跑成无上限全量训练
+
 Phase 3 的 reward 方案需要明确固定为：
 
 - baseline reward 使用 `math_prm`
@@ -732,7 +767,15 @@ Checklist：
 - [ ] 确认 reward 不会大面积恒为 0、恒为 1 或恒为同一常数
 - [ ] 确认生成结果满足 `Step N:` / `†Answer:` 的基本格式要求
 - [ ] 确认 rollout 后的权重同步回推理引擎链路正常
+- [ ] Phase 3 的第一次训练验证固定采用 time-boxed smoke run，而不是无上限长跑
+- [ ] 为 smoke run 设置明确 wall-clock 限制（默认 `20` 分钟）
+- [ ] 在时间上限内至少观察到一轮足以判断链路健康度的训练日志
+- [ ] smoke run 期间显式检查关键 metrics 的方向性，而不是只确认脚本未报错
+- [ ] 确认 `reward / kl / loss / response_length / 格式质量` 没有明显朝异常方向发展
+- [ ] 如果脚本未崩但 metrics 明显异常，明确将该次 smoke run 记为失败而不是通过
 - [ ] 确认至少能跑通 smoke test 训练
+- [ ] smoke run 结束后清理全部相关进程，避免残留进程持续占用 GPU
+- [ ] smoke run 结束后再次确认 GPU 已释放
 - [ ] 确认再进行一次更长时长的全量训练试跑
 - [ ] 记录训练中的 OOM、死锁、图像载入异常、reward 异常分布等问题
 
