@@ -77,6 +77,194 @@
 
 这些超参在前期不要求一次性全部严格对齐，但需要作为后续 phase 的对齐目标。
 
+### 2.5 本机现有资源、路径、状态与使用方式
+
+以下结论基于逐份核对 `/home/ubuntu/URSA-MATH` 下的核心文档：
+
+- `README.md`
+- `RUN_GUIDE.md`
+- `DATASET_LOAD.md`
+- `CODE_EXAMPLES.md`
+- `GUIDE.md`
+- `paper.md`
+- `paper_zh.md`
+- `PAPER.md`
+- `STAGE3_REPRODUCTION_PLAN.md`
+- `report-2026-03-12.md`
+- `20260312-URSA-MATH-reading-log.md`
+- `DOCUMENTATION_INDEX.md`
+- `checkpoints/URSA-8B/README.md`
+- `checkpoints/URSA-RM-8B/README.md`
+
+#### 2.5.1 模型 checkpoint
+
+`URSA-8B`
+
+- 本机路径：`/home/ubuntu/URSA-MATH/checkpoints/URSA-8B`
+- 当前状态：目录已就绪；存在 `model-00001-of-00007.safetensors` 到 `model-00007-of-00007.safetensors`；`model.safetensors.index.json` 的 `metadata.total_size=32179133444`；磁盘占用约 `30G`
+- 架构标识：`config.json` 中 `architectures=["UrsaForConditionalGeneration"]`，`model_type="ursa"`
+- 直接使用方式：
+  - 原仓库 torch 示例：`python /home/ubuntu/URSA-MATH/examples/run_ursa_8b_torch_example.py --device cuda:0`
+  - 原仓库 standalone 示例：`python /home/ubuntu/URSA-MATH/examples/run_ursa_8b_torch_example_standalone.py --device cuda:0`
+  - 原仓库 vLLM 路径：先执行 `bash /home/ubuntu/URSA-MATH/start.sh`，再用 `/home/ubuntu/URSA-MATH/inference/vllm_infer.py` 或 `inference/start_vllm_infer.sh`，其中 `--model` 指向该目录
+- LightRFT 接入位置：`examples/math_prm/run_grpo_math_prm_ursa_8b.sh` 中的 `--pretrain` 应直接指向该目录
+
+`URSA-RM-8B`
+
+- 本机路径：`/home/ubuntu/URSA-MATH/checkpoints/URSA-RM-8B`
+- 当前状态：目录已就绪；存在 `model-00001-of-00007.safetensors` 到 `model-00007-of-00007.safetensors`；`model.safetensors.index.json` 的 `metadata.total_size=32167793672`；磁盘占用约 `30G`
+- 架构标识：`config.json` 中 `architectures=["UrsaForTokenClassification"]`，`model_type="ursa"`
+- 直接使用方式：
+  - 原仓库 RM 示例：`python /home/ubuntu/URSA-MATH/examples/run_ursa_rm_8b_score_example.py --device cuda:0`
+  - 原仓库 standalone RM 示例：`python /home/ubuntu/URSA-MATH/examples/run_ursa_rm_8b_score_example_standalone.py --device cuda:0`
+  - 原仓库打分入口：`/home/ubuntu/URSA-MATH/inference/prm_infer_score.py`
+- LightRFT 接入位置：`examples/math_prm/run_grpo_math_prm_ursa_8b.sh` 中的 `--reward_pretrain '{"math_prm":"..."}'` 应直接指向该目录
+- 额外说明：`reward_models_utils.py` 当前会以 HF 方式直连加载 `UrsaForTokenClassification`，这和 Stage 3 需要的 logit 级 step score 读取方向一致
+
+环境与依赖
+
+- URSA 侧已提供验证过的依赖文件：`/home/ubuntu/URSA-MATH/requirements.txt`
+- 文档记录的推荐环境是 `conda activate ursa`
+- `requirements.txt` 中已固定 `torch==2.5.1+cu124`、`transformers==4.45.2`，并说明如需仓库内嵌 vLLM 路径需额外执行一次 `bash /home/ubuntu/URSA-MATH/start.sh`
+- `report-2026-03-12.md` 里已有 `URSA-8B` / `URSA-RM-8B` 示例脚本在该仓库环境下跑通过的记录；本计划仍应把 LightRFT 侧链路视为待再次 smoke test
+
+Docker 环境基线约束
+
+- 当前仓库唯一的环境基线文件是 `/data/LightRFT/Dockerfile`
+- 其中已经明确安装的 pip 依赖、版本和安装顺序应视为 **冻结基线**
+- 后续为了接 URSA Stage 3，**不允许** 擅自修改这些包的版本、替换它们、删除它们，或打乱其安装顺序
+- 如果后续出现训练、推理、编译或兼容性问题，默认优先通过代码适配、数据适配、脚本参数适配来解决，而不是漂移 Docker 基线
+- 只有当任务本身被明确升级为“环境迁移 / Docker 基线重做”时，才允许讨论改动这些包；否则一律以保本一致性为先
+
+当前需要视为冻结的 Docker pip 基线包括：
+
+- `torch==2.9.0`
+- `torchvision`
+- `torchaudio`
+- `ninja`
+- `deepspeed==0.18.3`
+- `vllm==0.13.0`
+- `datasets`
+- `librosa`
+- `peft`
+- `tensorboard`
+- `decord`
+- `easydict`
+- `matplotlib`
+- `wandb`
+- `mathruler`
+- `pylatexenc`
+- `flash_attn==2.8.3` 对应 wheel
+- `sglang==0.5.6.post2`
+
+这条约束的工程含义需要明确：
+
+- 后续文档、脚本、排障记录中如果提到依赖问题，要先区分“代码问题 / 数据问题 / 参数问题”与“环境基线问题”
+- 在没有显式环境迁移任务之前，不把“升级 vLLM / 升级 DeepSpeed / 降级 torch / 改 flash-attn 版本”视为正常修复手段
+- Stage 3 复现应建立在当前 Dockerfile 已定义好的运行时基线之上
+
+#### 2.5.2 数据集与图片资产
+
+`MMathCoT-1M`
+
+- 本机路径：`/home/ubuntu/URSA-MATH/datasets/URSA-MATH/MMathCoT-1M/train.jsonl`
+- 当前状态：文件已存在；`wc -l` 为 `1019059`；磁盘占用约 `821M`
+- 当前 schema：原始字段是 `image_url / instruction / output`
+- 角色定位：这是 Stage 3 policy / RL 的原始数据源；当前计划前期也是从这里出发，而不是先做 `20K -> 15.3K` 筛选
+- 图像前缀覆盖：`MathV-360k`、`Multimath`、`DataEngine_Geometry`、`Mavis_Extra`、`VarsityTutors`、`Geo170K`
+
+`DualMath-1.1M`
+
+- 本机路径：`/home/ubuntu/URSA-MATH/datasets/URSA-MATH/DualMath-1.1M/train.jsonl`
+- 当前状态：文件已存在；`wc -l` 为 `1100779`；磁盘占用约 `1.8G`
+- 当前 schema：原始字段也是 `image_url / instruction / output`
+- 角色定位：这是 Stage 2 的 PRM 训练数据与 PRM 行为校验数据，不是 Stage 3 rollout prompt 的直接输入
+- 图像前缀覆盖：`MathV-360k`、`Multimath`、`Mavis_Extra`、`DataEngine_Geometry`、`Geo170K`、`VarsityTutors`
+
+图片资产
+
+- 本机根路径：`/home/ubuntu/URSA-MATH/datasets/URSA-MATH/images`
+- 当前状态：目录已就绪；磁盘占用约 `32G`
+- 已确认存在的关键前缀：
+  - `MathV-360k -> data_images`（软链）
+  - `Multimath/RGB_images -> ../RGB_images`（软链）
+  - `DataEngine_Geometry`
+  - `Geo170K`
+  - `Mavis_Extra`
+  - `VarsityTutors`
+- 这与 `DATASET_LOAD.md` 中要求的最终目录布局一致，说明 raw `image_url` 在本机上已具备被解析成真实文件路径的基础
+
+当前缺口
+
+- `/home/ubuntu/URSA-MATH` 下当前没有现成的 Stage 3 `15K` 筛选子集
+- `/home/ubuntu/URSA-MATH` 下当前也没有现成可直接喂给 LightRFT 的 `prompt / images / reference / label` 版 Stage 3 manifest
+- 也就是说，当前不是“缺模型或缺原始数据”，而是“缺一层从 URSA raw schema 到 LightRFT 训练 schema 的转换”
+
+#### 2.5.3 在 URSA-MATH 仓库中的直接使用方式
+
+数据集验证与载入脚本都已经在原仓库里准备好了，可以直接拿本机现有资源做检查：
+
+- 构造兼容 manifest 并预览载入：`python /home/ubuntu/URSA-MATH/examples/run_dataset_loading_example.py`
+- 随机抽样检查字段完整性与图片可读性：`python /home/ubuntu/URSA-MATH/examples/validate_dataset_random_loading.py --mode sample --sample-size 10000`
+- 走原始推理入口做端到端校验：`python /home/ubuntu/URSA-MATH/examples/validate_dataset_entrypoints.py --policy-model /home/ubuntu/URSA-MATH/checkpoints/URSA-8B --prm-model /home/ubuntu/URSA-MATH/checkpoints/URSA-RM-8B`
+
+这些脚本的作用需要明确区分：
+
+- 它们主要验证的是 `URSA-MATH` 原仓库现有 inference loader 能否吃到兼容 manifest
+- 它们不是 LightRFT Stage 3 训练用的最终数据格式生成脚本
+
+#### 2.5.4 在 LightRFT 中应如何接入
+
+LightRFT 当前 Stage 3 训练脚本的关键参数要求是：
+
+- `--pretrain`：指向 `URSA-8B`
+- `--reward_pretrain`：指向 `URSA-RM-8B`
+- `--prompt_data`：指向训练集
+- `--input_key "prompt"`
+- `--images_key "images"`
+- `--reference_key "reference"`
+- `--label_key "label"`
+
+这意味着当前不能把 `/home/ubuntu/URSA-MATH/datasets/URSA-MATH/MMathCoT-1M/train.jsonl` 原样直接传给 `--prompt_data`，因为它的 raw schema 是：
+
+- `image_url`
+- `instruction`
+- `output`
+
+而 LightRFT 当前希望消费的是至少如下 schema：
+
+```json
+{
+  "prompt": "...",
+  "images": ["/abs/path/to/image.png"],
+  "reference": "...",
+  "label": "math_prm"
+}
+```
+
+当前阶段建议采用的转换语义应固定为：
+
+- `prompt`：从 raw `instruction` 中抽出给 actor rollout 的题面文本
+- `images`：由 `/home/ubuntu/URSA-MATH/datasets/URSA-MATH/images/<image_url>` 解析成绝对路径列表
+- `reference`：从 raw `output` 中抽取 `†Answer:` 后的最终答案
+- `label`：
+  - `Phase 3` 先用 `math_prm`
+  - `Phase 4+` 再切到 `math_psgrpo`
+
+因此，当前脚本里最应该落成的本机实际路径不是占位符，而应是：
+
+```bash
+PATH_TO_YOUR_BASE_MODEL="/home/ubuntu/URSA-MATH/checkpoints/URSA-8B"
+PATH_TO_URSA_RM="/home/ubuntu/URSA-MATH/checkpoints/URSA-RM-8B"
+PATH_TO_YOUR_MATH_DATASET="/path/to/converted_lightrft_stage3_manifest.jsonl"
+```
+
+这里最后一个路径必须强调：
+
+- 它应该是“转换后的 LightRFT 训练 manifest”
+- 不是 raw `MMathCoT-1M/train.jsonl`
+- 也不是 `DualMath-1.1M/train.jsonl`
+
 ---
 
 ## 3. 当前仓库已有基础
@@ -158,6 +346,17 @@
 - replay buffer 主结构
 - advantage calculator 主结构
 
+### 原则 5：Docker 基线保本一致
+
+`/data/LightRFT/Dockerfile` 里已经安装的 pip 包、版本与安装顺序，默认都视为当前项目的运行时基线。
+
+因此后续做 URSA Stage 3 时：
+
+- 不把改 Docker 依赖版本作为常规调试手段
+- 不为了临时修一个问题去升级/降级 `torch`、`deepspeed`、`vllm`、`flash_attn`、`sglang` 等关键包
+- 所有复现、排障、对齐工作默认在现有 Docker 基线下完成
+- 如确实怀疑环境本身有问题，需要单独立项说明是“环境迁移”，不能混在 Stage 3 常规开发里顺手改
+
 ---
 
 ## 5. 分阶段任务计划
@@ -165,6 +364,10 @@
 下面按可执行顺序拆分 phase。每个 phase 都有明确目标、产出和 checklist。
 
 ### Phase 0：范围冻结与基线确认
+
+状态：
+
+- 已完成（`2026-03-18`）
 
 目标：
 
@@ -179,14 +382,27 @@
 
 Checklist：
 
-- [ ] 明确当前只做 `URSA-8B + URSA-RM-8B + Stage 3 RL`
-- [ ] 明确 Stage 1 / Stage 2 不在本轮范围内
-- [ ] 明确前期阶段不做“从完整 `MMathCoT-1M` 中抽 `20K` 候选再筛到 `15.3K`”的静态筛选
-- [ ] 明确前期先使用全量数据进行链路验证
-- [ ] 明确行为对齐属于必须检查项，而不是“可选优化”
-- [ ] 明确数据集载入、图像载入、reference 传递都属于必须检查项
+- [x] 明确当前只做 `URSA-8B + URSA-RM-8B + Stage 3 RL`
+- [x] 明确 Stage 1 / Stage 2 不在本轮范围内
+- [x] 明确前期阶段不做“从完整 `MMathCoT-1M` 中抽 `20K` 候选再筛到 `15.3K`”的静态筛选
+- [x] 明确前期先使用全量数据进行链路验证
+- [x] 明确行为对齐属于必须检查项，而不是“可选优化”
+- [x] 明确数据集载入、图像载入、reference 传递都属于必须检查项
+
+已完成产出：
+
+- 已在本文件第 `2.5` 节补齐 `/home/ubuntu/URSA-MATH` 的模型、数据集、图片树、原仓库使用方式、LightRFT 接入方式
+- 已明确 `/data/LightRFT/Dockerfile` 是冻结运行时基线，后续默认不允许改 pip 包版本或安装顺序
+- 已把当前阶段的范围冻结为：
+  - 先用全量 `MMathCoT-1M`
+  - 先完成 LightRFT schema 接线
+  - 先不做论文 `20K -> 15.3K` 静态筛选
 
 ### Phase 1：数据集载入与样本 schema 打通
+
+状态：
+
+- 已完成（`2026-03-18`）
 
 目标：
 
@@ -207,18 +423,66 @@ Checklist：
 
 Checklist：
 
-- [ ] 确认训练数据 JSON/JSONL schema 与 `PromptDatasetVL` 兼容
-- [ ] 确认 `prompt` 能正确进入训练 prompt 构建流程
-- [ ] 确认 `images` 字段能被 `PromptDatasetVL` 和图像预处理链正确读取
-- [ ] 确认图像路径格式稳定可用，优先绝对路径
-- [ ] 确认缺图、坏图、空图样本的失败模式可观测
-- [ ] 确认 `reference` 能从数据集一路传递到 reward 计算入口
-- [ ] 确认 `label` 能用于区分 `math_prm` / `math_psgrpo` 等 reward 路径
-- [ ] 确认全量数据中不存在大面积缺失 `reference` 的样本
-- [ ] 确认全量数据中图像字段的数量分布与格式分布
-- [ ] 确认 mixed multimodal 数据在 batch/collate 阶段不会丢字段
-- [ ] 先跑一轮小规模 dataset smoke test，打印单条样本和 batch 结构
-- [ ] 再跑全量数据扫描，统计字段完整率与异常样本数量
+- [x] 明确 `/home/ubuntu/URSA-MATH/datasets/URSA-MATH/MMathCoT-1M/train.jsonl` 与 `/home/ubuntu/URSA-MATH/datasets/URSA-MATH/DualMath-1.1M/train.jsonl` 的 raw schema 是 `image_url / instruction / output`
+- [x] 明确 `MMathCoT-1M` 是 Stage 3 policy / RL 原始数据源，`DualMath-1.1M` 主要用于 PRM 训练或 PRM 行为校验
+- [x] 明确 raw `train.jsonl` 不能直接作为 `--prompt_data` 传给 `PromptDatasetVL`
+- [x] 先从全量 raw 数据生成一份 LightRFT 兼容 manifest：`prompt / images / reference / label`
+- [x] 确认训练数据 JSON/JSONL schema 与 `PromptDatasetVL` 兼容
+- [x] 确认 `prompt` 能正确进入训练 prompt 构建流程
+- [x] 确认 `images` 字段能被 `PromptDatasetVL` 和图像预处理链正确读取
+- [x] 确认图像路径格式稳定可用，优先绝对路径，并基于 `/home/ubuntu/URSA-MATH/datasets/URSA-MATH/images` 展开
+- [x] 确认缺图、坏图、空图样本的失败模式可观测
+- [x] 确认 `reference` 能从数据集一路传递到 reward 计算入口
+- [x] 确认 `label` 能用于区分 `math_prm` / `math_psgrpo` 等 reward 路径
+- [x] 明确当前本机未发现现成 `15K` Stage 3 筛选集或现成 LightRFT-compatible manifest，需要自行构建
+- [x] 确认全量数据中不存在大面积缺失 `reference` 的样本
+- [x] 确认全量数据中图像字段的数量分布与格式分布
+- [x] 确认 mixed multimodal 数据在 batch/collate 阶段不会丢字段
+- [x] 先跑一轮小规模 dataset smoke test，打印单条样本和 batch 结构
+- [x] 再跑全量数据扫描，统计字段完整率与异常样本数量
+
+已完成产出：
+
+- 新增转换脚本：`examples/math_prm/prepare_ursa_stage3_manifest.py`
+- 已生成全量 Stage 3 LightRFT manifest：
+  - `/data/LightRFT/tmp/ursa_stage3/mmathcot_stage3_math_prm.jsonl`
+- 已生成全量扫描 summary：
+  - `/data/LightRFT/tmp/ursa_stage3/mmathcot_stage3_math_prm.summary.json`
+- 已生成图片随机抽样打开校验结果：
+  - `/data/LightRFT/tmp/ursa_stage3/mmathcot_stage3_math_prm.image_sample_check.json`
+
+本轮实测结果：
+
+- `rows_seen = 1019059`
+- `rows_written = 1019059`
+- `prompt_fallback_rows = 763`
+- `reference_fallback_rows = 2977`
+- `empty_prompt_rows = 0`
+- `empty_reference_rows = 0`
+- `images_per_sample_counts = {"1": 1019059}`
+- `image_prefix_counts`：
+  - `MathV-360k = 319619`
+  - `Multimath = 264205`
+  - `DataEngine_Geometry = 186471`
+  - `Mavis_Extra = 141406`
+  - `VarsityTutors = 55162`
+  - `Geo170K = 52196`
+- 随机抽样 `10000` 条 manifest 记录，图片真实打开成功 `10000/10000`
+
+字段链路确认：
+
+- `PromptDatasetVL` 当前可以直接消费该 manifest 的 `prompt / images / reference / label`
+- `PromptDatasetVL.collate_fn()` 会返回 `(prompts, images, refs, labels)`
+- `ppo_trainer_vl.py` 会将 dataloader batch 作为 `all_prompts / all_images / all_references / all_labels` 传入经验构造器
+- `experience_maker_vl.py` 与 `fast_exp_maker.py` 会继续把 `references / labels / raw_images / prompt_and_output` 送入 reward model forward
+
+因此，Phase 1 当前已经完成的不是抽象分析，而是：
+
+- raw schema 已被转成 LightRFT 训练 schema
+- 全量数据已实际扫过
+- 图片路径已实际解析成绝对路径
+- 样本已通过 `PromptDatasetVL` smoke 校验
+- `reference / label / images` 到 reward 入口的代码链路已确认存在
 
 ### Phase 2：URSA actor / PRM 载入与基础行为对齐
 
@@ -402,8 +666,13 @@ Checklist：
 Checklist：
 
 - [ ] 将脚本中的 reward label 明确为目标 Stage 3 路径
+- [ ] 将脚本中的模型占位路径替换为本机实际路径：`/home/ubuntu/URSA-MATH/checkpoints/URSA-8B` 与 `/home/ubuntu/URSA-MATH/checkpoints/URSA-RM-8B`
+- [ ] 将 `PATH_TO_YOUR_MATH_DATASET` 明确为转换后的 LightRFT manifest，而不是 raw `train.jsonl`
+- [ ] 明确当前所有运行和排障都以 `/data/LightRFT/Dockerfile` 为冻结环境基线
+- [ ] 明确 Dockerfile 中已安装的 pip 包版本与安装顺序后续不允许擅自改动，保持保本一致性
 - [ ] 去掉与 PRM 直连需求冲突的 `rm_use_engine` 用法
 - [ ] 明确 `freeze_prefix`、多模态开关、图像字段名等必要参数
+- [ ] 明确如需先做资源 smoke test，可直接复用 `/home/ubuntu/URSA-MATH/examples/run_dataset_loading_example.py` 与 `validate_dataset_entrypoints.py`
 - [ ] 梳理当前脚本参数与论文 Table 14 的差异
 - [ ] 优先对齐 `n_samples_per_prompt = 8`
 - [ ] 优先对齐 `temperature = 1.0`
@@ -595,11 +864,14 @@ Checklist：
 
 当前 LightRFT 已经有一定 URSA 接入基础，但离“可解释、可验证、可复现的 URSA Stage 3”还差几个关键环节：
 
-1. 数据载入与字段传递需要显式检查
-2. 多模态 PRM 的真实行为需要对齐检查
-3. PS-GRPO reward 公式需要真正落地
-4. 当前阶段先用完整 `MMathCoT-1M` 全量数据试跑，而不是先做筛选
-5. 数据筛选流程属于后置 phase，需要在基础链路稳定后再补
+1. 本机 `/home/ubuntu/URSA-MATH` 已经具备 `URSA-8B`、`URSA-RM-8B`、完整 `MMathCoT-1M`、完整 `DualMath-1.1M` 与完整图片树，当前主要缺口不是资源下载
+2. 真正缺的是从 URSA raw schema 到 LightRFT `prompt / images / reference / label` schema 的转换与接线
+3. `/data/LightRFT/Dockerfile` 中已安装的 pip 依赖、版本与顺序应视为冻结基线，后续默认不允许改动，必须保持保本一致性
+4. 数据载入与字段传递仍然需要显式检查
+5. 多模态 PRM 的真实行为仍然需要对齐检查
+6. PS-GRPO reward 公式仍然需要真正落地
+7. 当前阶段先用完整 `MMathCoT-1M` 全量数据试跑，而不是先做筛选
+8. 数据筛选流程属于后置 phase，需要在基础链路稳定后再补
 
 因此，本计划不是直接追求“论文最终形态一步到位”，而是明确分阶段推进：
 
