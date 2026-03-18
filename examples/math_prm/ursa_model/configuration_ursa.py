@@ -24,7 +24,7 @@ if sys.version_info >= (3, 10):
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 from transformers import CONFIG_MAPPING
-from attrdict import AttrDict
+from .attrdict_compat import AttrDict
 logger = logging.get_logger(__name__)
 
 

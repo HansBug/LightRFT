@@ -17,7 +17,7 @@ Dependencies:
 """
 from __future__ import annotations
 
-from typing import Optional, List, Tuple
+from typing import Any, Optional, List, Tuple
 import re
 import json
 import math
@@ -2299,7 +2299,7 @@ class MathPRMReward(nn.Module):
                 for end in ('<|im_end|>', '<|im_start|>'):
                     if end in user_block:
                         user_block = user_block.split(end)[0]
-                question = user_block.strip()
+                question = self._clean_question_text(user_block)
                 break
 
         # --- Extract assistant response ---
@@ -2317,6 +2317,34 @@ class MathPRMReward(nn.Module):
 
         return question, response
 
+    @staticmethod
+    def _clean_question_text(question: str) -> str:
+        """
+        Remove chat-template vision placeholders so the PRM sees the same plain
+        question text as the original URSA inference script.
+        """
+        question = _clean_vision_token(question)
+        question = question.replace("<|image|>", "").replace("<image>", "")
+        return question.strip()
+
+    @staticmethod
+    def _select_prm_image(raw_image: Any):
+        """
+        Normalize one sample's raw image payload to the single-image shape used by
+        URSA-MATH PRM inference: ``[image]`` or ``[None]``.
+        """
+        if isinstance(raw_image, list):
+            for item in raw_image:
+                if item is not None:
+                    return [item]
+            return [None]
+        if isinstance(raw_image, tuple):
+            for item in raw_image:
+                if item is not None:
+                    return [item]
+            return [None]
+        return [raw_image] if raw_image is not None else [None]
+
     # ------------------------------------------------------------------
     # Forward  (replicates single_inference() from prm_infer_score.py)
     # ------------------------------------------------------------------
@@ -2327,7 +2355,7 @@ class MathPRMReward(nn.Module):
         sequences,
         attention_mask,
         prompt_and_output=None,
-        raw_images=None,  # ignored – URSA is invoked with image=None
+        raw_images=None,
         **kwargs,
     ) -> torch.Tensor:
         """
@@ -2349,7 +2377,8 @@ class MathPRMReward(nn.Module):
             sequences: Ignored in favour of ``prompt_and_output``.
             attention_mask: Ignored.
             prompt_and_output: List[str] of decoded full conversation texts.
-            raw_images: Ignored (URSA is invoked with ``image=None`` for math).
+            raw_images: Optional per-sample raw images passed through from the
+                rollout batch. When provided, the first image is fed into URSA-RM.
 
         Returns:
             FloatTensor of shape ``(B,)`` with aggregated step scores in [0, 1].
@@ -2364,16 +2393,18 @@ class MathPRMReward(nn.Module):
             raise ValueError("Either sequences or prompt_and_output must be provided")
 
         batch_rewards: List[float] = []
+        image_inputs = raw_images or [None] * len(prompt_and_output)
 
-        for text in prompt_and_output:
+        for text, sample_image in zip_longest(prompt_and_output, image_inputs, fillvalue=None):
+            if text is None:
+                continue
             question, response = self._split_conversation(text)
             input_prompt = self._prepare_prm_input(question, response)
 
             # Build conversation in URSA's expected ChatML format.
-            # Always include <|image|> placeholder even for text-only math;
+            # Always include <|image|> placeholder. When no image is provided,
             # the processor handles image=None by producing a zero-value feature
             # of the correct shape, maintaining the 576-token image expansion.
-            # Source: single_inference() in prm_infer_score.py lines 100-105.
             conv = [
                 {"role": "system", "content": self._SYSTEM_PROMPT},
                 {"role": "user",   "content": "<|image|>" + input_prompt},
@@ -2384,7 +2415,7 @@ class MathPRMReward(nn.Module):
 
             inputs = self.processor(
                 formatted_prompt,
-                [None],            # image=None for text-only math problems
+                self._select_prm_image(sample_image),
                 return_tensors='pt',
             ).to(device, torch.bfloat16)
 

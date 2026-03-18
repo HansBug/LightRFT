@@ -403,6 +403,30 @@ def _load_engine(
     return engine, processor
 
 
+def _shared_base_key(cfg: RewardModelConfig) -> Optional[Tuple[str, str]]:
+    """
+    Return the cache key for reward-model base sharing.
+
+    We only share bases for:
+    - engine-backed reward models
+    - URSA PRM loaded via direct HF model path
+    """
+    if cfg.rtype == RewardModelType.MATH_PRM:
+        return ("math_prm", cfg.path)
+    if cfg.use_engine:
+        return ("engine", cfg.path)
+    return None
+
+
+def _load_shared_base(cfg: RewardModelConfig) -> Tuple[Any, Any]:
+    """Load the correct shared base for a reward config."""
+    if cfg.rtype == RewardModelType.MATH_PRM:
+        return _load_ursa_prm_model(cfg.path, get_current_device())
+    if cfg.use_engine:
+        return _load_engine(cfg.path, get_current_device())
+    raise ValueError(f"Reward config does not support shared base loading: {cfg}")
+
+
 # ============================================================================
 # Model Builders for Each Reward Type
 # ============================================================================
@@ -627,6 +651,12 @@ def build_math_prm(
 
     if base is not None:
         base_model, processor = base
+        if type(base_model).__name__ != "UrsaForTokenClassification":
+            strategy.print(
+                "[build_math_prm] Received a non-URSA shared base. "
+                "Reloading URSA-RM via direct HF path."
+            )
+            base_model, processor = _load_ursa_prm_model(cfg.path, get_current_device())
     else:
         base_model, processor = _load_ursa_prm_model(cfg.path, get_current_device())
 
@@ -684,19 +714,23 @@ def load_reward_models(
 
     # Share base models across reward models to save memory
     # Since some reward models can share the same base model, we only load it once
-    shared_bases: Dict[str, Tuple[Any, Any]] = {}
-    shared_count: Dict[str, int] = {}
+    shared_bases: Dict[Tuple[str, str], Tuple[Any, Any]] = {}
+    shared_count: Dict[Tuple[str, str], int] = {}
     for cfg in cfgs:
-        if cfg.path not in shared_count:
-            shared_count[cfg.path] = 1
-        else:
-            shared_count[cfg.path] += 1
+        cache_key = _shared_base_key(cfg)
+        if cache_key is None:
+            continue
 
-        if shared_count[cfg.path] == 1:
-            shared_bases[cfg.path] = _load_engine(cfg.path, get_current_device())
-            strategy.print(f"Init reward model {cfg.path} (engine={cfg.use_engine})")
+        if cache_key not in shared_count:
+            shared_count[cache_key] = 1
         else:
-            strategy.print(f"Use shared base model {cfg.path}")
+            shared_count[cache_key] += 1
+
+        if shared_count[cache_key] == 1:
+            shared_bases[cache_key] = _load_shared_base(cfg)
+            strategy.print(f"Init reward model base {cfg.path} (engine={cfg.use_engine}, type={cfg.rtype})")
+        else:
+            strategy.print(f"Use shared base model {cfg.path} (type={cfg.rtype})")
 
     for cfg in cfgs:
         if cfg.rtype not in _BUILDERS:
@@ -706,7 +740,7 @@ def load_reward_models(
         # Initialize model with proper context (supports FSDP/meta device init)
         with strategy.init_model_context() as _:
             # All reward types now support shared base models
-            rm, tok = _BUILDERS[cfg.rtype](cfg, strategy, base=shared_bases.get(cfg.path))
+            rm, tok = _BUILDERS[cfg.rtype](cfg, strategy, base=shared_bases.get(_shared_base_key(cfg)))
         
         rms.append(rm)
         toks.append(tok)

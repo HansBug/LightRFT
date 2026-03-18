@@ -579,6 +579,10 @@ Checklist：
 
 ### Phase 2：URSA actor / PRM 载入与基础行为对齐
 
+状态：
+
+- 已完成（`2026-03-18`）
+
 目标：
 
 - 确认 LightRFT 中加载出的 `URSA-8B` 和 `URSA-RM-8B` 至少在关键行为上与原始实现一致
@@ -595,19 +599,77 @@ Checklist：
 
 Checklist：
 
-- [ ] 确认 `train_colocate.py` 对 URSA actor 的识别逻辑稳定可复现
-- [ ] 确认 `UrsaActor` 的 tokenizer / processor / forward / generate 行为与原始 URSA 使用方式一致
-- [ ] 确认 `URSA-RM-8B` 强制走 HF 直连路径，而不是错误走 engine 路径
-- [ ] 确认 `UrsaProcessor` 使用方式与原实现保持一致
-- [ ] 确认 PRM 的图像输入不再被忽略，而是真实传入
-- [ ] 确认 step marker 仍然使用论文与原实现要求的特殊标记
-- [ ] 确认 `Step N:` 格式要求被保留，且不会被 chat template 破坏
-- [ ] 确认 `†Answer:` 的终答案格式要求被保留
-- [ ] 确认读取 step score 的 token 位置与原脚本一致
-- [ ] 确认图像占位 token / padding 逻辑与现有 URSA-RM 推理逻辑一致
-- [ ] 确认单条样本下，LightRFT 侧 PRM 输出与原始推理脚本输出可对比
-- [ ] 确认 `min / avg / last` 等聚合结果在对齐测试中可复现
-- [ ] 对齐失败时记录是文本格式问题、图像问题还是 processor 行为问题
+- [x] 确认 `train_colocate.py` 对 URSA actor 的识别逻辑稳定可复现
+- [x] 确认 `UrsaActor` 的 tokenizer / processor / forward / generate 行为与原始 URSA 使用方式一致
+- [x] 确认 `URSA-RM-8B` 强制走 HF 直连路径，而不是错误走 engine 路径
+- [x] 确认 `UrsaProcessor` 使用方式与原实现保持一致
+- [x] 确认 PRM 的图像输入不再被忽略，而是真实传入
+- [x] 确认 step marker 仍然使用论文与原实现要求的特殊标记
+- [x] 确认 `Step N:` 格式要求被保留，且不会被 chat template 破坏
+- [x] 确认 `†Answer:` 的终答案格式要求被保留
+- [x] 确认读取 step score 的 token 位置与原脚本一致
+- [x] 确认图像占位 token / padding 逻辑与现有 URSA-RM 推理逻辑一致
+- [x] 确认单条样本下，LightRFT 侧 PRM 输出与原始推理脚本输出可对比
+- [x] 确认 `min / avg / last` 等聚合结果在对齐测试中可复现
+- [x] 对齐失败时记录是文本格式问题、图像问题还是 processor 行为问题
+
+已完成产出：
+
+- `examples/math_prm/train_colocate.py`
+  - 新增 `load_actor_tokenizer_processor()`，对 `URSA-8B` 显式走 `UrsaProcessor.from_pretrained(...)`
+  - 避免继续误走 `AutoProcessor` 返回 tokenizer 的错误路径
+  - 顺手修复训练入口顶层对不存在 `get_vlm_for_sequence_regression` 的硬依赖，改为仅在显式启用 critic 时再懒加载
+- `examples/math_prm/reward_models_utils.py`
+  - 修复 reward model shared-base 逻辑
+  - `math_prm` 现在会强制走 `_load_ursa_prm_model(...)`
+  - 即使命令行全局带了 `--rm_use_engine`，`URSA-RM-8B` 也不会再被错误预加载为 engine base
+- `examples/math_prm/reward_models.py`
+  - `MathPRMReward` 现在会真实消费 rollout 传下来的 `raw_images`
+  - 从 `prompt_and_output` 抽 question 时会清理 `<|image|>` / `<image>` / vision placeholder token，确保 PRM 输入语义与原始 `prepare_input()` 一致
+  - step marker 插入、`575` image pad 对齐、step-logit 读取位置以及 `min/avg/last` 聚合均保持与原脚本一致
+- `examples/math_prm/ursa_model/`
+  - 新增 `attrdict_compat.py`，使用 `easydict`/本地 fallback 兼容当前 Docker 基线中缺失的 `attrdict`
+  - 修复 `modeling_ursa.py` 在当前 transformers 版本下访问 `_supports_sdpa` 时的初始化期异常
+- 新增 Phase 2 对齐校验脚本：
+  - `examples/math_prm/check_phase2_alignment.py`
+- 新增 Phase 2 轻量单测：
+  - `examples/math_prm/test_phase2_alignment.py`
+- 新增单条样本 GPU 对齐结果：
+  - `/data/LightRFT/tmp/ursa_stage3/phase2_alignment_smoke.json`
+
+本轮实测结果：
+
+- `UrsaProcessor.from_pretrained('/home/ubuntu/URSA-MATH/checkpoints/URSA-8B')` 在当前环境下已可直接加载，得到：
+  - `processor = UrsaProcessor`
+  - `tokenizer = Qwen2TokenizerFast`
+  - `image_processor = VLMImageProcessor`
+- 训练入口 `train_colocate.py` 已可被直接 import，`is_ursa_model('/home/ubuntu/URSA-MATH/checkpoints/URSA-8B') == True`
+- `python -m unittest -q examples.math_prm.test_phase2_alignment`
+  - 已通过（`4` 个测试）
+- `python examples/math_prm/check_phase2_alignment.py --device cuda:0`
+  - 已实际跑通 `URSA-RM-8B` 单条样本对齐
+  - `prepared_input_match = true`
+  - `reference.min = 0.87109375`
+  - `lightrft.min = 0.87109375`
+  - `reference.avg = 0.94140625`
+  - `lightrft.avg = 0.94140625`
+  - `delta.min = 0.0`
+  - `delta.avg = 0.0`
+  - `within_tolerance = true`
+
+对齐失败分类约定：
+
+- 文本格式问题：
+  - `Step N:` 丢失
+  - `†Answer:` 丢失
+  - chat template 残留 vision placeholder 污染 question 文本
+- 图像问题：
+  - `raw_images` 未传入 PRM
+  - 图片对象/路径未被正常转成单图输入
+- processor 行为问题：
+  - `AutoProcessor` 误返回 tokenizer
+  - `UrsaProcessor` 未被显式加载
+  - checkpoint 在当前 transformers 版本下初始化失败
 
 ### Phase 3：先跑通“全量数据 + 基础 reward”训练链路
 

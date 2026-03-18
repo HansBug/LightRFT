@@ -1,0 +1,19 @@
+{
+  "prepared_input_match": true,
+  "prepared_input_reference": "You are given a problem and a step-by-step solution. You need to check the correctness of each step.\nQuestion:How many numbered training stages are shown in this diagram?\nStep 1: The diagram labels Stage 1 as VL Alignment. и\nStep 2: The diagram labels Stage 2 as Math SFT. и\nStep 3: The diagram labels Stage 3 as PRM Training and Verifying. и\n†Answer: 3",
+  "prepared_input_lightrft": "You are given a problem and a step-by-step solution. You need to check the correctness of each step.\nQuestion:How many numbered training stages are shown in this diagram?\nStep 1: The diagram labels Stage 1 as VL Alignment. и\nStep 2: The diagram labels Stage 2 as Math SFT. и\nStep 3: The diagram labels Stage 3 as PRM Training and Verifying. и\n†Answer: 3",
+  "reference": {
+    "min": 0.87109375,
+    "avg": 0.94140625
+  },
+  "lightrft": {
+    "min": 0.87109375,
+    "avg": 0.94140625,
+    "last": 0.87109375
+  },
+  "delta": {
+    "min": 0.0,
+    "avg": 0.0
+  },
+  "within_tolerance": true
+}

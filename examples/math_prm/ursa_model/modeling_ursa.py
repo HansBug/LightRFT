@@ -72,7 +72,10 @@ class UrsaPreTrainedModel(PreTrainedModel):
         Retrieve language_model's attribute to check whether the model supports
         SDPA or not.
         """
-        return self.language_model._supports_sdpa
+        language_model = getattr(self, "language_model", None)
+        if language_model is None:
+            return False
+        return getattr(language_model, "_supports_sdpa", False)
     
 
 class UrsaForConditionalGeneration(UrsaPreTrainedModel):

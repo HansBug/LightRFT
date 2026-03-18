@@ -47,7 +47,6 @@ from lightrft.utils import add_arguments, ensure_video_input_available
 ensure_video_input_available()
 
 from lightrft.datasets import PromptDatasetVL, SFTDatasetVL
-from lightrft.models.utils import get_vlm_for_sequence_regression
 from lightrft.utils import blending_datasets, get_tokenizer_processor_vl
 from lightrft.models.actor_language import ActorLanguage
 from lightrft.models.actor_vl import ActorVL
@@ -91,6 +90,41 @@ def is_ursa_model(model_path: str) -> bool:
         except:
             pass
     return False
+
+
+def load_actor_tokenizer_processor(
+    *,
+    model_path: str,
+    model,
+    strategy,
+    use_fast: bool,
+):
+    """
+    Load the actor tokenizer/processor, using the explicit URSA processor path
+    when the checkpoint is a URSA model.
+    """
+    if is_ursa_model(model_path):
+        from ursa_model import UrsaProcessor
+
+        processor = UrsaProcessor.from_pretrained(model_path)
+        tokenizer = processor.tokenizer
+        tokenizer.padding_side = "left"
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+            model.config.pad_token_id = tokenizer.pad_token_id
+        strategy.print(
+            f"Loaded URSA processor explicitly: tokenizer={type(tokenizer).__name__}, "
+            f"processor={type(processor).__name__}"
+        )
+        return tokenizer, processor
+
+    return get_tokenizer_processor_vl(
+        model_path,
+        model,
+        "left",
+        use_fast=use_fast,
+    )
 
 
 def train(args):
@@ -180,6 +214,13 @@ def train(args):
         strategy.print(f"Froze {frozen_params_count}/{total_params_count} parameters based on prefixes: {freeze_prefix}")
 
     if args.critic_pretrain:
+        try:
+            from lightrft.models import get_vlm_for_sequence_regression
+        except ImportError as exc:
+            raise ImportError(
+                "critic_pretrain was provided, but get_vlm_for_sequence_regression "
+                "is not available in this LightRFT checkout."
+            ) from exc
         critic = get_vlm_for_sequence_regression(
             args.critic_pretrain,
             "critic",
@@ -243,8 +284,11 @@ def train(args):
         ema_model = None
 
     # configure tokenizer and processor
-    tokenizer, processor = get_tokenizer_processor_vl(
-        args.pretrain, actor.model, "left", strategy, use_fast=not strategy.args.disable_fast_tokenizer
+    tokenizer, processor = load_actor_tokenizer_processor(
+        model_path=args.pretrain,
+        model=actor.model,
+        strategy=strategy,
+        use_fast=not strategy.args.disable_fast_tokenizer,
     )
     assert processor is not None, "processor is None"
 
