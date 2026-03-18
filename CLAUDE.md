@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+Note: `AGENTS.md` is a symlink to `CLAUDE.md`, so they are the same file. Do not edit both separately or duplicate the same change.
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## About LightRFT
@@ -64,11 +66,77 @@ The typical RLHF training loop works as follows:
 2. **Training** (`SPMDPPOTrainer`): updates the actor using PPO-style policy loss; optionally co-locates reward models on the same GPUs.
 3. **Strategy** (`DeepspeedStrategy` / `FSDPV2Strategy`): wraps models for distributed training with a uniform API.
 
+### Real End-to-End Control Flow in Current Code
+
+The most useful way to understand the framework is to follow the actual runtime chain used by the example scripts:
+
+1. **Training script assembles everything**  
+   Example: `examples/gsm8k_geo3k/train_colocate.py`
+   - Parse args
+   - Build strategy with `get_strategy(args)`
+   - Build actor / critic / reward models / initial model
+   - Build tokenizer / processor / datasets / dataloaders
+   - Call `strategy.setup_inference_engine(...)`
+   - Instantiate `SPMDPPOTrainer` or `SPMDPPOTrainerVL`
+   - Call `trainer.fit(...)`
+
+2. **`trainer.fit()` drives the outer loop**  
+   In `ppo_trainer.py` / `ppo_trainer_vl.py`, `fit()` iterates:
+   - sample prompt batch
+   - call `experience_maker.make_experience_list(...)`
+   - append experiences into replay buffer
+   - run `ppo_train(...)`
+   - clear replay buffer
+   - log / save / update KL controller
+
+3. **`FastExperienceMaker` builds trainable experiences**  
+   `FastExperienceMaker.make_experience_list(...)` is the real rollout pipeline:
+   - `generate_samples(...)`: call vLLM/SGLang to generate responses
+   - shard-parallel preprocess via `strategy.sp_data_processor.preprocess(...)`
+   - `_make_experience_list_by_model(...)`: run actor / initial model / critic / reward models
+   - shard-parallel postprocess
+   - `_process_experiences(...)`: reward shaping, dynamic filtering, overlong penalty
+   - `_compute_advantages_and_returns(...)`: KL-adjusted reward, returns, advantages
+
+4. **Trainer consumes `Experience` objects and updates models**  
+   `training_step_actor(...)` and `training_step_critic(...)` in `ppo_trainer.py` / `ppo_trainer_vl.py`:
+   - actor forward -> fresh logprobs
+   - `PolicyLoss` computes PPO/CPGD-style loss
+   - optional KL loss term / PTX loss / aux loss
+   - `strategy.backward(...)`
+   - `strategy.optimizer_step(...)`
+
+5. **Updated actor weights are pushed back to the rollout engine**  
+   After `ppo_train(...)`, `SPMDPPOTrainerBase` calls:
+   - `strategy.update_engine_weights(actor)`
+   This is important: the training model and the rollout engine are separate objects.
+
+### Layered Architecture
+
+Think of the codebase as six layers that interact in one direction:
+
+1. **Experiment assembly layer**: example `train_colocate.py` scripts
+2. **Distributed/runtime layer**: `lightrft/strategy/`
+3. **Training loop layer**: `lightrft/trainer/ppo_trainer*.py`, `spmd_ppo_trainer.py`
+4. **Experience construction layer**: `fast_exp_maker.py`, `experience_maker*.py`
+5. **Model/loss layer**: `lightrft/models/`
+6. **Dataset/schema layer**: `lightrft/datasets/`
+
+When customizing LightRFT, the right question is usually not "where is algorithm X?" but:
+- Is this change about rollout?
+- reward shaping?
+- advantage computation?
+- policy loss?
+- distributed execution?
+- data schema?
+
+Many named algorithms in the repo are implemented as a composition across these layers rather than as a standalone trainer class.
+
 ### Key Modules
 
 **`lightrft/trainer/`** — Core training logic:
 - `spmd_ppo_trainer.py`: The primary trainer (`SPMDPPOTrainer`, `SPMDPPOTrainerVL`). Extends `PPOTrainer` with SPMD/tensor-parallel support. This is the "entry point" for understanding how training works end-to-end.
-- `fast_exp_maker.py`: `FastExperienceMaker` — handles rollout generation via vLLM/SGLang, reward aggregation, and advantage computation. The `generate_samples()` and `_get_return_advs()` methods are the main algorithm extension points.
+- `fast_exp_maker.py`: `FastExperienceMaker` — handles rollout generation via vLLM/SGLang, reward aggregation, model-side experience assembly, reward shaping, and advantage computation. The most important extension points are `generate_samples()`, `_process_experiences()`, `_compute_advantages_and_returns()`, and `_make_experience_list_by_model()`.
 - `advantage_calculator.py`: Pluggable advantage estimators (GAE, Group Norm/GRPO, RLOO, REINFORCE++, CPGD). Use `get_advantage_calculator()` factory.
 - `ppo_trainer.py` / `ppo_trainer_vl.py`: Base PPO trainer (ABC) for LLM and VLM respectively.
 - `experience_maker.py`: `NaiveExperienceMaker` base class; `FastExperienceMaker` inherits from this.
@@ -103,11 +171,14 @@ The typical RLHF training loop works as follows:
 
 | To change... | Edit... |
 |---|---|
-| Policy loss objective (GRPO/GSPO/GMPO/DAPO/Dr.GRPO) | `lightrft/models/loss.py` → `PolicyLoss.forward()` |
+| Policy loss objective / clipping rule | `lightrft/models/loss.py` → `PolicyLoss.forward()` |
 | Advantage estimation method | `lightrft/trainer/advantage_calculator.py` |
 | Rollout generation / FIRE sampling | `lightrft/trainer/fast_exp_maker.py` → `generate_samples()` |
-| Reward aggregation / normalization | `lightrft/trainer/fast_exp_maker.py` → `_get_return_advs()` |
+| Reward shaping / normalization / overlong penalty | `lightrft/trainer/fast_exp_maker.py` → `_process_experiences()` / `_compute_advantages_and_returns()` |
+| Reward model execution / aggregation | `lightrft/trainer/fast_exp_maker.py` → `RewardComputationEngine` |
+| Model-side experience construction | `lightrft/trainer/fast_exp_maker.py` → `_make_experience_list_by_model()` |
 | Distributed training backend | `lightrft/strategy/` |
+| Dataset schema / prompt-image-reference extraction | `lightrft/datasets/prompts_dataset.py` / `prompts_dataset_vl.py` |
 
 ### Training Entry Points (examples)
 
@@ -117,6 +188,28 @@ Each example has its own `train_colocate.py`. They share the same general struct
 3. Load actor, reference model, reward models
 4. Instantiate `SPMDPPOTrainer` (or VL variant)
 5. Call `trainer.fit()`
+
+### Important Implementation Reality Notes
+
+These points matter when modifying the code:
+
+- **Current mainline training path uses `FastExperienceMaker`, not `NaiveExperienceMaker`.**  
+  If you are changing rollout, reward shaping, or advantage logic for real training, start with `fast_exp_maker.py`.
+
+- **The training actor and rollout engine are separate.**  
+  Updating the PyTorch actor is not enough; the trainer later calls `strategy.update_engine_weights(actor)` to push weights into vLLM/SGLang.
+
+- **Algorithms are distributed across layers.**  
+  For example:
+  - GRPO / group norm / RLOO / REINFORCE++ are primarily in `advantage_calculator.py`
+  - DAPO-like behavior is currently represented mainly by dynamic sampling and overlong reward shaping in `fast_exp_maker.py`
+  - CPGD is split between `advantage_calculator.py` and `PolicyLoss`
+
+- **Not every algorithm name in docs corresponds to a fully separate implementation path.**  
+  Some feature flags are partially wired through scripts/trainers but do not yet have a full dedicated implementation branch in `PolicyLoss`. Check the actual call chain before assuming a flag is active.
+
+- **If a new runtime parameter is consumed via `self.strategy.config.xxx`, you must update `StrategyConfig`.**  
+  Adding only an argparse flag is not enough if the fast path reads from `StrategyConfig.from_args(args)`.
 
 ## Commit Style
 
@@ -152,25 +245,37 @@ The trainer module orchestrates the entire RLHF training loop, from experience g
   - Automatic KL divergence monitoring and adaptive KL penalty
   - Checkpoint saving/loading with strategy-aware state management
   - Integration with vLLM/SGLang for fast inference
+  - Pushes updated actor weights back to rollout engine after PPO training
 - **Extension points**:
   - Override `training_step()` to customize the training loop (e.g., add auxiliary losses)
-  - Override `_learn()` to modify how policy/value updates are computed
-  - Add custom logging by extending `_log_metrics()`
-  - Implement custom checkpoint logic in `save_checkpoint()` / `load_checkpoint()`
+  - Override `training_step_actor()` / `training_step_critic()` to change actor/critic updates
+  - Extend `ppo_train()` if you need a different replay-buffer-to-update schedule
+  - Add custom logging through `save_logs_and_checkpoints()`
+  - Extend trajectory saving / checkpoint timing in `SPMDPPOTrainerBase`
 
 **`FastExperienceMaker`** (`fast_exp_maker.py`)
-- **What it does**: Generates rollout experiences using vLLM/SGLang inference engines. Handles prompt processing, generation, reward computation, and advantage estimation.
+- **What it does**: Generates rollout experiences using vLLM/SGLang inference engines. This is the real "experience pipeline" in current training. It handles:
+  - text/VLM preprocessing
+  - rollout engine generation
+  - actor/reference/critic forward passes
+  - reward model execution and aggregation
+  - KL computation
+  - reward shaping
+  - advantage/return computation
+  - final packing into `Experience` / `ExperienceVL`
 - **Key features**:
   - Multimodal data processing (text, images, videos)
   - Multiple reward model aggregation (weighted sum, product, min/max)
   - FIRE sampling support for improved exploration
   - Running reward normalization across batches
   - Sample packing for training efficiency
+  - Shard-parallel preprocess/postprocess through `strategy.sp_data_processor`
 - **Extension points**:
   - **Add new sampling strategies**: Modify `generate_samples()` to implement custom sampling (e.g., beam search variants, constrained decoding)
-  - **Custom reward aggregation**: Edit `_get_return_advs()` to change how multiple rewards are combined
-  - **New reward preprocessing**: Add methods in `_get_return_advs()` for custom reward normalization/transformation
+  - **Custom reward model execution/aggregation**: Edit `RewardComputationEngine`
+  - **New reward preprocessing**: Extend `_process_experiences()`
   - **Custom advantage computation**: Integrate new advantage calculators via `get_advantage_calculator()`
+  - **Custom model-side bookkeeping**: Extend `_preprocess_sample()` / `_pack_experience()`
 
 **Example: Adding a new sampling strategy**
 ```python
@@ -195,6 +300,7 @@ def generate_samples(self, prompts, **kwargs):
   - Implement `preprocess_rewards()` for custom reward preprocessing
   - Implement `compute()` for advantage/return computation
   - Register in `get_advantage_calculator()` factory function
+  - If needed, also update `normalize_advantages_cross_batch()` behavior for your estimator
 
 **Example: Adding a custom advantage calculator**
 ```python
@@ -214,7 +320,10 @@ def get_advantage_calculator(config):
 
 **`ReplayBuffer` / `ReplayBufferVL`** (`replay_buffer.py`, `replay_buffer_vl.py`)
 - **What it does**: Stores and samples experiences for training with optional sample packing.
-- **Extension points**: Override `make_experience_batch()` to customize batch construction or add data augmentation.
+- **Important detail**: This is closer to an experience cache/rebatcher than a classic off-policy RL replay buffer.
+- **Extension points**:
+  - Override `make_experience_batch()` to customize batch construction
+  - Change `append()` / `normalize()` behavior if your algorithm needs different per-item statistics
 
 ---
 
@@ -231,6 +340,7 @@ The models module provides wrappers around HuggingFace models with RLHF-specific
   - Support for gradient checkpointing and LoRA
   - Modality-aware parameter filtering (text-only vs. multimodal)
   - Integration with vLLM/SGLang for inference
+  - Optional action entropy output for high-entropy token filtering
 - **Extension points**:
   - **Add new modalities**: Create a new actor class inheriting from the base actor, define modality in `ActorModality` enum
   - **Custom forward pass**: Override `forward()` to add auxiliary outputs (e.g., uncertainty estimates)
@@ -266,7 +376,7 @@ class ActorMyModality(ActorLanguage):  # Or inherit from appropriate base
 ```
 
 **`PolicyLoss`** (`loss.py`)
-- **What it does**: Unified policy loss supporting PPO, CPGD, DAPO, and high-entropy token filtering.
+- **What it does**: Unified policy loss for actor optimization. In the current code path, the concrete implemented branches are standard PPO clipping, CPGD-style clipping, and optional entropy-mask-based token selection.
 - **Key features**:
   - Clipped surrogate objective (PPO)
   - Asymmetric clipping (CPGD)
@@ -276,6 +386,7 @@ class ActorMyModality(ActorLanguage):  # Or inherit from appropriate base
   - **Add new policy objectives**: Modify `forward()` to implement new clipping strategies or loss formulations
   - **Custom masking**: Add new masking strategies beyond entropy-based filtering
   - **Token-level vs. sequence-level**: Adjust aggregation logic for different granularities
+  - If your objective needs additional per-sample metadata, also update trainer `training_step_actor()`
 
 **Example: Adding a new policy loss variant**
 ```python
@@ -313,10 +424,13 @@ The strategy module abstracts distributed training backends (DeepSpeed, FSDP) be
   - `optimizer_step()`: Updates parameters with gradient clipping
   - `save_ckpt()` / `load_ckpt()`: Checkpoint management
   - `setup_inference_engine()`: Initializes vLLM/SGLang
+  - `gather_and_generate()`: gathers prompts across ranks and calls rollout engine
+  - `update_engine_weights()`: broadcasts actor weights into rollout engine
 - **Extension points**:
   - **Add new backends**: Create a new strategy class inheriting from `StrategyBase`
   - Implement all abstract methods for your backend
   - Register in `get_strategy()` factory function
+  - If your backend changes rollout runtime behavior, also inspect `engine_generate_local()` / `gather_and_generate()`
 
 **`DeepspeedStrategy`** (`deepspeed/deepspeed.py`)
 - **What it does**: DeepSpeed ZeRO (Stage 1/2/3) implementation with automatic mixed precision.
@@ -375,8 +489,9 @@ Dataset handlers for different data formats and tasks.
 - **Data format**: Expects JSON/JSONL with fields like `prompt`, `images`, `videos`, `label`, `reference`
 - **Extension points**:
   - **Add new data formats**: Create new dataset classes inheriting from `torch.utils.data.Dataset`
-  - **Custom preprocessing**: Override `__getitem__()` to add data augmentation or filtering
-  - **Multi-turn conversations**: Extend to handle conversation history
+  - **Custom schema normalization**: Extend `preprocess_data(...)`
+  - **Multi-turn / chat-template behavior**: Extend prompt rendering logic in the dataset layer
+  - **Do not put reward logic here** unless it is strictly schema extraction; algorithmic reward logic belongs in trainer/experience maker
 
 **Example: Adding a custom dataset**
 ```python
@@ -412,17 +527,19 @@ Utility functions and helpers.
 
 1. **Advantage computation**: Create new calculator in `advantage_calculator.py`
 2. **Policy loss**: Add loss variant in `loss.py` → `PolicyLoss.forward()`
-3. **Reward preprocessing**: Modify `FastExperienceMaker._get_return_advs()`
+3. **Reward preprocessing / shaping**: Modify `FastExperienceMaker._process_experiences()` or `_compute_advantages_and_returns()`
 4. **CLI args**: Add algorithm-specific flags in your training script
-5. **Test**: Use `FakeStrategy` for single-process testing
+5. **Config plumbing**: Add the new fields to `StrategyConfig` if the fast path reads them from `self.strategy.config`
+6. **Test**: Use `FakeStrategy` for single-process testing
 
 ### Scenario 2: Adding a New Model Architecture
 
 1. **Actor wrapper**: Create `actor_my_model.py` inheriting from `ActorLanguage` or `ActorVL`
 2. **Modality definition**: Add to `ActorModality` enum if new modality
-3. **Processor**: Ensure tokenizer/processor is compatible in `utils/processor.py`
-4. **Monkey patches**: Add any model-specific patches in `models/monkey_patch/`
-5. **Test**: Write unit tests in `models/tests/`
+3. **Parameter routing**: Update modality-based extra-kwarg routing in `fast_exp_maker.py`
+4. **Processor**: Ensure tokenizer/processor is compatible in `utils/processor.py`
+5. **Monkey patches**: Add any model-specific patches in `models/monkey_patch/`
+6. **Test**: Write unit tests in `models/tests/`
 
 ### Scenario 3: Adding a New Distributed Backend
 
@@ -436,8 +553,9 @@ Utility functions and helpers.
 
 1. **Local reward model**: Create wrapper in `models/` (e.g., `my_reward_model.py`)
 2. **Remote reward model**: Implement HTTP endpoint, use `remote_rm_utils.py`
-3. **Integration**: Pass reward model to trainer, configure in `FastExperienceMaker`
-4. **Aggregation**: Modify reward combination logic in `_get_return_advs()`
+3. **Integration**: Pass reward model / `reward_fn` / label map / recipe to trainer
+4. **Aggregation**: Modify `RewardComputationEngine._aggregate_rewards()`
+5. **If needed**: Add post-reward shaping in `_process_experiences()`
 
 ### Scenario 5: New Sampling Strategy (e.g., Constrained Decoding)
 
@@ -456,6 +574,9 @@ Utility functions and helpers.
 - **Gradient norms**: Watch for exploding/vanishing gradients
 - **KL divergence**: Ensure KL stays within reasonable bounds (< 0.5 typically)
 - **Advantage whitening**: Verify advantages are normalized (mean ≈ 0, std ≈ 1)
+- **Verify engine sync**: If rollouts look stale after training, check whether `update_engine_weights()` is being reached
+- **Check `StrategyConfig`**: If a new flag seems ignored, confirm it exists in `strategy/config.py`
+- **For VLM issues**: Inspect image-token / pixel-value consistency checks in `ppo_trainer_vl.py` and `fast_exp_maker.py`
 
 ---
 
