@@ -213,9 +213,19 @@ These points matter when modifying the code:
 
 ## Commit Style
 
-Follow Conventional Commits: `type(scope): description`
-- Common types: `feature`, `fix`, `polish`, `docs`, `style`, `refactor`
+Follow the dominant repository convention from recent history, using Conventional-Commit-style subjects:
+- Prefer `type(scope): imperative summary`
+- Common types in this repository: `feature`, `fix`, `polish`, `docs`, `style`, `refactor`
 - Example: `feature(trainer): add CPGD advantage estimator`
+- Keep `type` and `scope` lowercase when present
+- Omit the scope only when the change genuinely spans the whole repository
+- Write the summary as a concise imperative phrase starting with a lowercase verb such as `add`, `update`, `improve`, `align`, or `clean up`
+- Do not add a trailing period to the subject line
+- For non-trivial changes, add a blank line and then a body
+- In the body, prefer a short overview paragraph first, followed by `-` bullet points for concrete changes, tests, compatibility notes, docs updates, or behavior clarifications
+- When a bullet wraps, continue it on the next indented line instead of starting a new bullet
+- Preserve standard trailers when applicable, especially `Co-Authored-By: Name <email>`
+- Merge commits should keep the generated history style, such as `Merge branch 'main' into dev/...` or `Merge pull request #52 from ...`
 
 ## PR Checklist
 
