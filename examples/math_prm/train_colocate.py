@@ -97,6 +97,19 @@ def is_ursa_model(model_path: str) -> bool:
     return False
 
 
+def resolve_reference_shard_size(world_size: int, preferred_shard_size: int = 8) -> int:
+    """
+    Pick a reference-model FSDP shard size that preserves the original 8-way
+    layout when possible, but still works for bounded small-world-size runs.
+    """
+    if world_size <= 0:
+        return preferred_shard_size
+    candidate = min(preferred_shard_size, world_size)
+    while candidate > 1 and world_size % candidate != 0:
+        candidate -= 1
+    return candidate
+
+
 def load_actor_tokenizer_processor(
     *,
     model_path: str,
@@ -306,7 +319,19 @@ def train(args):
         )
 
         if args.fsdp:
-            initial_model = strategy.prepare_model(initial_model, is_training=False, shard_size=8)
+            reference_shard_size = resolve_reference_shard_size(
+                world_size=strategy.world_size,
+                preferred_shard_size=8,
+            )
+            strategy.print(
+                "Preparing reference model with shard_size="
+                f"{reference_shard_size} (world_size={strategy.world_size})"
+            )
+            initial_model = strategy.prepare_model(
+                initial_model,
+                is_training=False,
+                shard_size=reference_shard_size,
+            )
             strategy.offload_model(initial_model)
 
     if args.enable_ema:
@@ -567,6 +592,12 @@ if __name__ == "__main__":
     parser.add_argument("--save_hf_ckpt", action="store_true", default=False)
     parser.add_argument("--disable_ds_ckpt", action="store_true", default=False)
     parser.add_argument("--save_trajectories", action="store_true", default=False, help="Save experience trajectories to JSON for debugging")
+    parser.add_argument(
+        "--trajectory_analysis",
+        action="store_true",
+        default=False,
+        help="Enable extra trajectory analysis metrics when saving trajectories",
+    )
     parser.add_argument("--num_trajectories_to_save", type=int, default=10, help="Number of trajectories to save per checkpoint")
     parser.add_argument("--print_replay_buffer_stats", action="store_true", default=False, help="Print detailed replay buffer statistics during training")
     parser.add_argument("--logging_steps", type=int, default=1)

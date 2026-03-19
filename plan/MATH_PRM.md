@@ -1144,6 +1144,91 @@ Checklist：
 
 ### Phase 7：全量数据训练观测与稳定性验证
 
+状态：
+
+- 已完成
+- 这里的“完成”指的是：Phase 7 所要求的 bounded full-data observation 已经真实跑通，观测数据已经收集完成
+- 这里的“完成”不等于“训练已经健康通过”
+- 当前结论是：训练链路、reward 链路、trajectory 保存和离线分析都已打通，但健康性判定仍未通过，当前明确问题是格式成功率偏低
+
+本轮最终观测配置：
+
+- 入口脚本：`examples/math_prm/run_phase7_observation.sh`
+- 真实运行时间戳：`20260319_205242`
+- 结果目录：`results/lightrft-ursa8b-stage3-phase7-observation/lightrft-ursa8b-stage3-phase7-observation-ep1-kl0.003-lr2e-6-20260319_205243`
+- 训练日志：`/data/LightRFT/tmp/ursa_stage3/phase7_observation/phase7_observation_20260319_205242.log`
+- 观测摘要：`/data/LightRFT/tmp/ursa_stage3/phase7_observation/phase7_summary_20260319_205242.json`
+- 轨迹文件：`results/lightrft-ursa8b-stage3-phase7-observation/lightrft-ursa8b-stage3-phase7-observation-ep1-kl0.003-lr2e-6-20260319_205243/trajectories/trajectories_step_1.json`
+- 数据：全量 `math_psgrpo` manifest
+- 资源形态：8 卡 bounded run
+- 关键缩小参数：
+  - `n_samples_per_prompt = 4`
+  - `rollout_batch_size = 8`
+  - `train_batch_size = 8`
+  - `micro_train_batch_size = 1`
+  - `micro_rollout_batch_size = 1`
+  - `prompt_max_len = 4096`
+  - `generate_max_len = 1024`
+  - `max_samples = 8`
+
+为完成 Phase 7 额外补的例子层修复：
+
+- `examples/math_prm/run_phase7_observation.sh`
+  - 修复 `timeout + wait` 在 `set -e` 下无法继续分析的问题
+  - 默认缺失 `math_psgrpo` manifest 时自动生成
+  - 最终采用 8 卡 bounded observation，而不是 1 卡空跑配置
+- `examples/math_prm/train_colocate.py`
+  - reference model 的 FSDP `shard_size` 改为按当前 `world_size` 自适应，避免小 world size 调试时直接断在 `assert world_size % shard_size == 0`
+  - 补上 `--trajectory_analysis` CLI，避免 `save_trajectories()` 在保存阶段因缺少字段报错
+- `examples/math_prm/analyze_phase7_observation.py`
+  - 空跑 observation 不再被误判为 healthy
+  - 多模态 impact check 改为“真实图像 vs 同尺寸白图”消融，避免 `raw_images=None` 这条路径失效
+
+最终观测结果：
+
+- 训练侧 progress 指标已经真实出现，不再是 `Episode 0it`
+  - `pg` 共记录 `9` 个点，均值 `-0.00146`，范围 `[-0.0557, 0.1710]`
+  - `kl` 共记录 `9` 个点，均值 `0.00823`，最大 `0.0167`
+  - `rm` 共记录 `9` 个点，均值 `0.75689`，范围 `[0.6880, 0.8120]`
+- `Detailed Step Statistics` 摘要：
+  - `Total Reward = 0.2500 ± 0.5000`
+  - `Accuracy Reward = 0.2500 ± 0.5000`
+  - `Model Reward = 0.2505 ± 0.3257`
+  - `Drop Moment = 0.7500 ± 0.5000`
+  - `Step Score Min = 0.2505 ± 0.3257`
+  - `Step Score Mean = 0.6748 ± 0.1058`
+  - `Response Length = 963.0 ± 11.6`
+  - `Total Length = 1154.0 ± 0.0`
+- trajectory/summary 侧统计：
+  - `num_trajectories = 4`
+  - `rollout_reward.mean = 0.25`
+  - `rollout_reward.variance = 0.1875`
+  - `psgrpo_final_reward.mean = 0.25`
+  - `correctness_ratio = 0.25`
+  - `drop_moment_ratio = 0.75`
+  - `answer_extraction_failure_ratio = 0.0`
+  - `format_success_ratio = 0.75`
+  - `prm_inference_failure_ratio = 0.0`
+  - `image_read_failure_ratio = 0.0`（扫描前 `128` 条 manifest）
+  - `multimodal_sample_count = 4`
+  - 多模态 PRM 图像消融：
+    - `checked_samples = 2`
+    - `failed_samples = 0`
+    - `mean_abs_delta = 0.816131591796875`
+
+Phase 7 结论：
+
+- Phase 7 的观测任务已经完成，当前已经能在全量 `math_psgrpo` manifest 上做 bounded full-data run，并稳定收集：
+  - reward 分布
+  - correctness/drop-moment 分布
+  - KL / pg 训练趋势
+  - 轨迹文件
+  - 图像读取统计
+  - 多模态 PRM 消融结果
+- 当前健康性仍不通过
+- 这次观测里最明确的问题不是训练崩溃，而是格式成功率只有 `0.75`
+- 也就是说，Phase 7 已经证明“当前 Stage 3 训练链路可观测、可分析、可保存”，但同时也证明“进入下一阶段前，仍需继续处理格式质量”
+
 目标：
 
 - 在“未做筛选”的全量数据上，观察真实训练行为
@@ -1160,17 +1245,17 @@ Checklist：
 
 Checklist：
 
-- [ ] 统计训练中 reward 的均值、方差、分位数
-- [ ] 统计 correctness 比例
-- [ ] 统计 drop-moment 命中比例
-- [ ] 统计无法抽取 final answer 的比例
-- [ ] 统计图像读取失败比例
-- [ ] 统计 PRM 推理失败比例
-- [ ] 观察 KL 曲线是否异常
-- [ ] 观察 actor loss 是否出现爆炸或塌缩
-- [ ] 抽样检查生成文本是否持续满足 Stage 3 指定格式
-- [ ] 抽样检查多模态样本是否真的影响 PRM 打分
-- [ ] 输出需要在下一阶段修复的问题列表
+- [x] 统计训练中 reward 的均值、方差、分位数
+- [x] 统计 correctness 比例
+- [x] 统计 drop-moment 命中比例
+- [x] 统计无法抽取 final answer 的比例
+- [x] 统计图像读取失败比例
+- [x] 统计 PRM 推理失败比例
+- [x] 观察 KL 曲线是否异常
+- [x] 观察 actor loss 是否出现爆炸或塌缩
+- [x] 抽样检查生成文本是否持续满足 Stage 3 指定格式
+- [x] 抽样检查多模态样本是否真的影响 PRM 打分
+- [x] 输出需要在下一阶段修复的问题列表
 
 ### Phase 8：补论文中的数据筛选流程
 

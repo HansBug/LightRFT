@@ -95,6 +95,7 @@ NO_REPEAT_NGRAM_SIZE="${NO_REPEAT_NGRAM_SIZE:-0}"
 MAX_SAMPLES="${MAX_SAMPLES:-1000000}"
 SAVE_STEPS="${SAVE_STEPS:-20}"
 MAX_CKPT_NUM="${MAX_CKPT_NUM:-2}"
+NUM_TRAJECTORIES_TO_SAVE="${NUM_TRAJECTORIES_TO_SAVE:-16}"
 
 # --- Multi-modal Settings ---
 limit_mm_image_per_prompt="${limit_mm_image_per_prompt:-10}"  # Max number of images per prompt.
@@ -162,6 +163,7 @@ export LR
 export PROMPT_MAX_LEN
 export GENERATE_MAX_LEN
 export ENGINE_TYPE
+export NUM_TRAJECTORIES_TO_SAVE
 
 python - <<'PY'
 import json
@@ -310,7 +312,7 @@ torchrun \
     --pretrain "${PATH_TO_YOUR_BASE_MODEL}" \
     --mixed_mm_data \
     --save_trajectories \
-    --num_trajectories_to_save 16 \
+    --num_trajectories_to_save ${NUM_TRAJECTORIES_TO_SAVE} \
     --print_replay_buffer_stats \
     --loss_agg_mode "seq-mean-token-mean" \
     --fsdp \

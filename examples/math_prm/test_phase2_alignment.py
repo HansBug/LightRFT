@@ -16,7 +16,9 @@ if str(MATH_PRM_DIR) not in sys.path:
 
 from reward_models import MathPRMReward
 from reward_models_utils import RewardModelType, load_reward_models, mix_rewards, reward_fn
+from analyze_phase7_observation import build_issue_list, is_valid_stage3_format, parse_progress_metrics
 from check_phase6_script_alignment import collect_phase6_alignment
+from train_colocate import resolve_reference_shard_size
 from lightrft.models.actor_vl import ActorVL
 from lightrft.utils.math_prm_output import sanitize_math_prm_response_text, should_stop_math_prm_response_text
 
@@ -648,6 +650,54 @@ class Phase2AlignmentTests(unittest.TestCase):
                 "gradient_accumulation": 16,
             },
         )
+
+    def test_phase7_format_validator_requires_single_terminal_answer_line(self):
+        good = "Step 1: Inspect.\nStep 2: Solve.\n†Answer: 37"
+        bad = "Step 1: Inspect.\n†Answer: 37\n†Answer: 38"
+
+        self.assertTrue(is_valid_stage3_format(good))
+        self.assertFalse(is_valid_stage3_format(bad))
+
+    def test_phase7_log_parser_extracts_pg_and_kl_series(self):
+        log_text = (
+            "Train epoch [1/1]: 50%|█████| 1/2 [00:02<00:02, pg=-0.0889, rm=0.411, ret=0.0884, glen=104, tlen=264, kl=0, act_lr=1.74e-6]\n"  # noqa: E501
+            "Train epoch [1/1]: 100%|██████████| 2/2 [00:03<00:00, pg=0.161, rm=0.396, ret=-0.0884, glen=126, tlen=287, kl=0.0244, act_lr=1.1e-6]\n"  # noqa: E501
+        )
+
+        metrics = parse_progress_metrics(log_text)
+        self.assertEqual(metrics["policy_gradient"]["count"], 2)
+        self.assertEqual(metrics["kl"]["count"], 2)
+        self.assertAlmostEqual(metrics["policy_gradient"]["min"], -0.0889, places=6)
+        self.assertAlmostEqual(metrics["policy_gradient"]["max"], 0.161, places=6)
+        self.assertAlmostEqual(metrics["kl"]["max"], 0.0244, places=6)
+
+    def test_phase7_reference_shard_size_adapts_to_small_world_size(self):
+        self.assertEqual(resolve_reference_shard_size(world_size=1), 1)
+        self.assertEqual(resolve_reference_shard_size(world_size=2), 2)
+        self.assertEqual(resolve_reference_shard_size(world_size=8), 8)
+        self.assertEqual(resolve_reference_shard_size(world_size=16), 8)
+
+    def test_phase7_issue_list_flags_empty_observation_runs(self):
+        issues = build_issue_list(
+            {
+                "trajectory_metrics": {"num_trajectories": 0},
+                "log_metrics": {"policy_gradient": {"count": 0}},
+                "image_scan": {},
+                "multimodal_impact": {},
+            }
+        )
+        self.assertTrue(any("没有形成有效训练样本" in issue for issue in issues))
+
+    def test_phase7_issue_list_flags_failed_multimodal_ablation(self):
+        issues = build_issue_list(
+            {
+                "trajectory_metrics": {"num_trajectories": 1},
+                "log_metrics": {"policy_gradient": {"count": 1}},
+                "image_scan": {},
+                "multimodal_impact": {"failed_samples": 2, "checked_samples": 0, "mean_abs_delta": None},
+            }
+        )
+        self.assertTrue(any("图像消融存在失败样本" in issue for issue in issues))
 
 
 if __name__ == "__main__":
