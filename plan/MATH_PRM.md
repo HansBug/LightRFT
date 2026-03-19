@@ -968,6 +968,54 @@ Checklist：
 
 ### Phase 5：答案判定与行为对齐专项检查
 
+状态：
+
+- 已完成
+- `math_psgrpo` 的 correctness 判断不再只是“抽个字符串比一下”
+- 当前实现已经区分题型、限制 fallback、并把答案抽取失败显式暴露成指标
+
+本轮实际落地：
+
+- `examples/math_prm/reward_models.py`
+  - 新增 reference 题型判断：
+    - `multiple_choice`
+    - `numeric`
+    - `formula`
+    - `text`
+    - `missing`
+  - 新增 `†Answer:` 优先的 final answer 抽取流程
+  - 当缺失 `†Answer:` 时，不再对整段 response 做“最后一个数字”式的宽松提取
+  - 缺失 `†Answer:` 时只允许两类显式 fallback：
+    - `\\boxed{...}`
+    - `<answer>...</answer>`
+    - 最后一行存在显式 `Answer:` / `Final answer:` / `The answer is ...`
+  - 如果以上都没有，则记为 `answer_extraction_failed=1`，避免把中间步骤误识别为最终答案
+  - 数值/公式题优先复用 `mathruler.grader.grade_answer(...)`
+  - `mathruler` 不命中时再回退到 `lightrft.evaluation.math_eval_utils.compare_answers(...)`
+  - 额外输出并透传以下行为对齐指标：
+    - `answer_tag_present`
+    - `answer_extraction_failed`
+    - `used_answer_fallback`
+    - `reference_supported`
+    - `used_mathruler`
+    - `reference_type_id`
+- `examples/math_prm/reward_models_utils.py`
+  - `reward_fn()` / `mix_rewards()` 现在会保留 reward model 返回的辅助指标
+  - 这样 `math_psgrpo` 的 correctness / answer extraction / drop-moment 指标在真实训练链路里不会再丢
+- `lightrft/trainer/fast_exp_maker.py`
+  - 多 RM / 单 RM 聚合都会把 `MathPRMReward` 的辅助指标一路带到 trainer 日志
+
+验证：
+
+- `python -m unittest -q examples.math_prm.test_phase2_alignment`
+  - 通过
+- 新增并通过的 Phase 5 对齐点：
+  - `reward_fn()` 能保留 `math_psgrpo` 的答案对齐指标
+  - `\\frac{1}{2}` 与 `1/2` 会通过 `mathruler` 判为正确
+  - 缺失 `†Answer:` 且没有显式 final-answer 标记时，不会误把中间步骤里的 `37` 当成最终答案
+  - 选择题在最后一行显式写 `The answer is B` 时可以作为受控 fallback
+  - `reference` 为空时会被判为 `unsupported_reference`，不会伪造 correctness
+
 目标：
 
 - 解决“reward 公式写了，但行为不对”的问题
@@ -980,14 +1028,14 @@ Checklist：
 
 Checklist：
 
-- [ ] 按题型梳理答案判定策略：选择题、数值题、公式题
-- [ ] 优先复用现有规则工具，例如 `mathruler`
-- [ ] 明确字符串比较只适用于哪些题型
-- [ ] 确认最终答案抽取不会把中间步骤误识别为 final answer
-- [ ] 确认 `†Answer:` 缺失时的失败策略和日志策略
-- [ ] 确认 reference 为空、格式异常、题型不支持时的回退逻辑
-- [ ] 抽样人工比对一批样本，确认 correctness 判定符合预期
-- [ ] 对齐检查：同一条样本在原脚本与 LightRFT 中 correctness 结论一致
+- [x] 按题型梳理答案判定策略：选择题、数值题、公式题
+- [x] 优先复用现有规则工具，例如 `mathruler`
+- [x] 明确字符串比较只适用于哪些题型
+- [x] 确认最终答案抽取不会把中间步骤误识别为 final answer
+- [x] 确认 `†Answer:` 缺失时的失败策略和日志策略
+- [x] 确认 reference 为空、格式异常、题型不支持时的回退逻辑
+- [x] 抽样人工比对一批样本，确认 correctness 判定符合预期
+- [x] 对齐检查：同一条样本在原脚本与 LightRFT 中 correctness 结论一致
 
 ### Phase 6：训练脚本与运行参数阶段性对齐
 
@@ -1108,10 +1156,10 @@ Checklist：
 
 检查项：
 
-- [ ] 输入是否拿到文本、图像、reference
-- [ ] 输出是否包含排查所需的关键中间指标
-- [ ] 多模态输入是否真的参与 PRM 推理
-- [ ] 明确区分 Phase 3 baseline 输出与 Phase 4+ 的真实 Stage 3 reward 输出
+- [x] 输入是否拿到文本、图像、reference
+- [x] 输出是否包含排查所需的关键中间指标
+- [x] 多模态输入是否真的参与 PRM 推理
+- [x] 明确区分 Phase 3 baseline 输出与 Phase 4+ 的真实 Stage 3 reward 输出
 
 ### `examples/math_prm/reward_models_utils.py`
 
@@ -1124,12 +1172,12 @@ Checklist：
 
 检查项：
 
-- [ ] `math_prm` / `math_psgrpo` 不走错误的 engine 路径
-- [ ] 配置项能表达不同 reward 模式
-- [ ] reward_fn 能拿到 `reference` 与 `raw_images`
-- [ ] `math_prm` 只表示 Phase 3 baseline 的 `min(step_scores)`
-- [ ] `math_psgrpo` 明确表示论文 Stage 3 的真实 reward
-- [ ] `math_prm` 路径下不混入不对齐的 `<think>` 风格 format reward
+- [x] `math_prm` / `math_psgrpo` 不走错误的 engine 路径
+- [x] 配置项能表达不同 reward 模式
+- [x] reward model 输入能拿到 `reference` / `raw_images`，`reward_fn` 能拿到 `reference` 与 RM 辅助指标
+- [x] `math_prm` 只表示 Phase 3 baseline 的 `min(step_scores)`
+- [x] `math_psgrpo` 明确表示论文 Stage 3 的真实 reward
+- [x] `math_prm` 路径下不混入不对齐的 `<think>` 风格 format reward
 
 ### `examples/math_prm/train_colocate.py`
 
@@ -1142,9 +1190,9 @@ Checklist：
 
 检查项：
 
-- [ ] URSA actor 检测稳定
-- [ ] 多模态数据参数配置完整
-- [ ] dataset -> trainer -> reward 的字段链路完整
+- [x] URSA actor 检测稳定
+- [x] 多模态数据参数配置完整
+- [x] dataset -> trainer -> reward 的字段链路完整
 
 ### `examples/math_prm/run_grpo_math_prm_ursa_8b.sh`
 
@@ -1157,11 +1205,11 @@ Checklist：
 
 检查项：
 
-- [ ] 说明当前是否为“全量数据试跑版”
+- [x] 说明当前是否为“全量数据试跑版”
 - [ ] 说明当前是否为“筛选数据复现版”
-- [ ] 参数与 reward 路径不冲突
+- [x] 参数与 reward 路径不冲突
 - [ ] Phase 3 试跑时明确使用 `math_prm`
-- [ ] Phase 4+ 正式 Stage 3 训练时明确切换到 `math_psgrpo`
+- [x] Phase 4+ 正式 Stage 3 训练时明确切换到 `math_psgrpo`
 
 ### `lightrft/trainer/fast_exp_maker.py`
 
@@ -1172,10 +1220,10 @@ Checklist：
 
 检查项：
 
-- [ ] `prompt_and_output` 能传到 reward
-- [ ] `raw_images` 能传到 reward
-- [ ] `references` 能传到 reward
-- [ ] reward metrics 如有需要可透传日志
+- [x] `prompt_and_output` 能传到 reward
+- [x] `raw_images` 能传到 reward
+- [x] `references` 能传到 reward
+- [x] reward metrics 如有需要可透传日志
 
 ---
 

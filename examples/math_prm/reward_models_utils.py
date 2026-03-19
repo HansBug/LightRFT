@@ -1024,6 +1024,7 @@ def mix_rewards(
     label_map: Dict[str, int],
     solution_strs: Sequence[str],
     refs: Sequence[str],
+    model_reward_metrics_list: Optional[List[Optional[Dict[str, torch.Tensor]]]] = None,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     """
     Mix rewards from multiple sources according to recipe configuration.
@@ -1079,6 +1080,10 @@ def mix_rewards(
         'final_reward': torch.zeros(B, dtype=torch.float32, device=device),
     }
 
+    def ensure_metric_key(metric_name: str) -> None:
+        if metric_name not in metrics_dict:
+            metrics_dict[metric_name] = torch.zeros(B, dtype=torch.float32, device=device)
+
     # ---------- Fallback scoring function ----------
     def get_model_reward(key: str, i: int) -> float:
         """
@@ -1102,6 +1107,25 @@ def mix_rewards(
             return 1.0
 
         return float(model_scores[idx, i].item())
+
+    def get_model_metrics(key: str, i: int) -> Dict[str, float]:
+        if not model_reward_metrics_list or key not in label_map:
+            return {}
+        idx = label_map[key]
+        if idx >= len(model_reward_metrics_list):
+            return {}
+        metrics = model_reward_metrics_list[idx]
+        if not metrics:
+            return {}
+
+        sample_metrics: Dict[str, float] = {}
+        for metric_name, tensor_value in metrics.items():
+            if not isinstance(tensor_value, torch.Tensor):
+                continue
+            if tensor_value.numel() <= i:
+                continue
+            sample_metrics[metric_name] = float(tensor_value.reshape(-1)[i].item())
+        return sample_metrics
 
     # ---------- Main loop ----------
     for i, lab in enumerate(labels):
@@ -1128,6 +1152,14 @@ def mix_rewards(
                 model_r = w * get_model_reward(key, i)
                 r += model_r
                 metrics_dict['model_reward'][i] += model_r
+                for metric_name, metric_value in get_model_metrics(key, i).items():
+                    ensure_metric_key(metric_name)
+                    if metric_name == "final_reward":
+                        continue
+                    if metric_name == "model_reward":
+                        metrics_dict[metric_name][i] = metric_value
+                    else:
+                        metrics_dict[metric_name][i] = metric_value
 
             elif typ == "rule":
                 rule_r = w * rule_reward_fn(sol, gt)
@@ -1179,6 +1211,7 @@ def mix_rewards(
 
 def reward_fn(
     model_reward_list: List[torch.Tensor],
+    model_reward_metrics_list: Optional[List[Optional[Dict[str, torch.Tensor]]]],
     labels: Sequence[str],
     queries: Sequence[str],
     refs: Sequence[str],
@@ -1221,4 +1254,11 @@ def reward_fn(
         model_scores = torch.zeros(0, B, dtype=torch.float32, device="cuda")
 
     # ------ call combination logic ------
-    return mix_rewards(labels, model_scores, label_map, queries, refs)
+    return mix_rewards(
+        labels,
+        model_scores,
+        label_map,
+        queries,
+        refs,
+        model_reward_metrics_list=model_reward_metrics_list,
+    )

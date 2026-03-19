@@ -39,7 +39,8 @@ PATH_TO_URSA_RM="${PATH_TO_URSA_RM:-/home/ubuntu/URSA-MATH/checkpoints/URSA-RM-8
 # PATH_TO_URSA_RM="AI-MO/URSA-8B-RM"
 
 # --- Dataset ---
-# MMathCoT-1M subset (15K samples) for stage3 training.
+# Default: converted full-data Stage 3 manifest for smoke / early training.
+# The paper-style filtered ~15.3K RL subset is a later Phase 8 deliverable.
 # Dataset format:
 #   "prompt"  : the math question (string, may include images)
 #   "images"  : list of image paths (optional, for multimodal problems)
@@ -304,14 +305,15 @@ torchrun \
 #     {                                                                        #
 #       "prompt": "math question text",                                       #
 #       "images": ["path/to/image1.jpg", ...],  # optional                    #
-#       "label": "math_prm",                    # or "math_prm_combined"      #
+#       "label": "math_psgrpo",                 # default Phase 4+ path       #
 #       "reference": "ground truth answer"      # optional                    #
 #     }                                                                        #
 #   - Set PATH_TO_YOUR_MATH_DATASET to the dataset directory                  #
 #                                                                              #
 # Step 4: Configure training hyperparameters (Part 2)                          #
-#   - Phase 3 baseline uses math_prm only: reward = min(step_scores)          #
-#   - PS-GRPO drop-moment logic is NOT part of this script yet                #
+#   - Current default path is Phase 4+: reward label = math_psgrpo            #
+#   - Phase 3 baseline remains available only when you intentionally provide   #
+#     a math_prm-labeled manifest and override EXPECTED_REWARD_LABEL          #
 #   - You can override all key hyperparameters and paths via environment vars #
 #                                                                              #
 # Step 5: Run training                                                         #

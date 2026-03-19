@@ -898,6 +898,7 @@ class RewardComputationEngine:
 
                 rewards, reward_metrics = self.reward_fn(
                     model_reward_list=same_batch_rewards,
+                    model_reward_metrics_list=[result.metrics for result in same_batch_results],
                     labels=outputs[mb_idx].labels,
                     queries=queries,
                     refs=outputs[mb_idx].references,

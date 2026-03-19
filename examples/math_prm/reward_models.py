@@ -32,7 +32,20 @@ from itertools import zip_longest
 from lightrft.utils import Timer, get_current_device
 from lightrft.strategy.utils.distributed_util import gather_inputs_object_for_inference
 from lightrft.strategy import StrategyBase, is_engine
-from lightrft.evaluation.math_eval_utils import compare_answers, extract_answer, normalize_answer
+from lightrft.evaluation.math_eval_utils import (
+    compare_answers,
+    extract_answer,
+    extract_answer_from_tags,
+    extract_boxed_answer,
+    extract_multiple_choice_answer,
+    extract_numeric_answer,
+    normalize_answer,
+)
+
+try:
+    from mathruler.grader import grade_answer as mathruler_grade_answer
+except ImportError:
+    mathruler_grade_answer = None
 
 
 # ============================================================================
@@ -2188,6 +2201,13 @@ class MathPRMReward(nn.Module):
     _IMAGE_PAD = 575
     _DROP_THRESHOLD = 0.3
     _DROP_GAMMA = 0.5
+    _REFERENCE_TYPE_TO_ID = {
+        "missing": 0.0,
+        "multiple_choice": 1.0,
+        "numeric": 2.0,
+        "formula": 3.0,
+        "text": 4.0,
+    }
 
     def __init__(
         self,
@@ -2360,19 +2380,174 @@ class MathPRMReward(nn.Module):
         return len(ref) == 1 and ref in {"A", "B", "C", "D"}
 
     @classmethod
-    def _extract_final_answer(cls, response: str) -> str:
-        response = cls._safe_text(response)
-        if not response:
+    def _infer_reference_type(cls, reference: Any) -> Tuple[str, bool]:
+        reference_text = cls._safe_text(reference)
+        if not reference_text:
+            return "missing", False
+
+        reference_norm = normalize_answer(reference_text).strip()
+        if cls._is_multiple_choice_reference(reference_norm):
+            return "multiple_choice", True
+
+        if reference_norm.lower() in {"yes", "no", "true", "false"}:
+            return "text", True
+
+        numeric_candidate = reference_norm.replace(",", "")
+        if re.fullmatch(r"-?\d+(?:\.\d+)?", numeric_candidate):
+            return "numeric", True
+        if re.fullmatch(r"-?\d+/\d+", numeric_candidate):
+            return "numeric", True
+
+        if any(token in reference_norm for token in ("\\", "=", "^", "_", "{", "}", "sqrt", "frac")):
+            return "formula", True
+        if re.search(r"[a-zA-Z]", reference_norm) and re.search(r"[\d=+\-*/()]", reference_norm):
+            return "formula", True
+
+        return "text", True
+
+    @classmethod
+    def _extract_answer_from_candidate(cls, candidate: str, reference_type: str) -> str:
+        candidate = cls._safe_text(candidate)
+        if not candidate:
             return ""
 
-        if "†Answer:" in response:
-            answer_block = response.split("†Answer:", 1)[-1]
-            for line in answer_block.splitlines():
-                line = line.strip()
-                if line:
-                    return line
+        boxed = extract_boxed_answer(candidate)
+        if boxed:
+            return boxed
 
-        return extract_answer(response)
+        tagged = extract_answer_from_tags(candidate, "answer")
+        if tagged:
+            return tagged
+
+        candidate = re.sub(
+            r"^(?:†\s*)?(?:final answer|correct answer(?: is)?|the answer is|answer)\s*[:：]?\s*",
+            "",
+            candidate,
+            flags=re.IGNORECASE,
+        ).strip()
+        candidate = candidate.rstrip(" .")
+        if not candidate:
+            return ""
+
+        if reference_type == "multiple_choice":
+            extracted = extract_multiple_choice_answer(candidate)
+            return extracted or normalize_answer(candidate).strip().upper()
+
+        if reference_type == "numeric":
+            if any(token in candidate for token in ("\\", "/", "=", "^", "{", "}", "sqrt", "frac")):
+                return normalize_answer(candidate)
+            extracted = extract_numeric_answer(candidate)
+            return extracted or normalize_answer(candidate)
+
+        if reference_type in {"formula", "text"}:
+            return normalize_answer(candidate)
+
+        return extract_answer(candidate)
+
+    @classmethod
+    def _extract_final_answer_details(cls, response: str, reference_type: str) -> Dict[str, Any]:
+        response = cls._safe_text(response)
+        details: Dict[str, Any] = {
+            "predicted_answer": "",
+            "answer_tag_present": False,
+            "answer_extraction_failed": True,
+            "used_answer_fallback": False,
+            "extraction_source": "missing",
+        }
+        if not response:
+            return details
+
+        if "†Answer:" in response:
+            details["answer_tag_present"] = True
+            answer_block = response.split("†Answer:", 1)[-1]
+            answer_block = re.split(r"\n\s*Step\s+\d+\s*:", answer_block, maxsplit=1)[0]
+            candidate_lines = [line.strip() for line in answer_block.splitlines() if line.strip()]
+            candidate = candidate_lines[0] if candidate_lines else answer_block.strip()
+            predicted_answer = cls._extract_answer_from_candidate(candidate, reference_type)
+            details["predicted_answer"] = predicted_answer
+            details["answer_extraction_failed"] = predicted_answer == ""
+            details["extraction_source"] = "dagger_answer"
+            return details
+
+        explicit_fallbacks = [
+            ("boxed", extract_boxed_answer(response)),
+            ("tagged_answer", extract_answer_from_tags(response, "answer")),
+        ]
+        for source, match in explicit_fallbacks:
+            if match:
+                details["predicted_answer"] = normalize_answer(match)
+                details["answer_extraction_failed"] = False
+                details["used_answer_fallback"] = True
+                details["extraction_source"] = source
+                return details
+
+        lines = [line.strip() for line in response.splitlines() if line.strip()]
+        if lines:
+            last_line = lines[-1]
+            explicit_line = re.match(
+                r"^(?:†\s*)?(?:final answer|correct answer(?: is)?|the answer is|answer)\b",
+                last_line,
+                flags=re.IGNORECASE,
+            )
+            if explicit_line:
+                predicted_answer = cls._extract_answer_from_candidate(last_line, reference_type)
+                details["predicted_answer"] = predicted_answer
+                details["answer_extraction_failed"] = predicted_answer == ""
+                details["used_answer_fallback"] = True
+                details["extraction_source"] = "explicit_last_line"
+                return details
+
+        return details
+
+    @classmethod
+    def _compare_final_answer(
+        cls,
+        predicted_answer: str,
+        reference: Any,
+        reference_type: str,
+        reference_supported: bool,
+    ) -> Tuple[bool, str]:
+        reference_text = cls._safe_text(reference)
+        if not reference_supported:
+            return False, "unsupported_reference"
+        if not reference_text:
+            return False, "missing_reference"
+        if not predicted_answer:
+            return False, "missing_prediction"
+
+        if reference_type == "multiple_choice":
+            pred_norm = normalize_answer(predicted_answer).strip().upper()
+            ref_norm = normalize_answer(reference_text).strip().upper()
+            return pred_norm == ref_norm, "multiple_choice_exact"
+
+        if reference_type in {"numeric", "formula"}:
+            if mathruler_grade_answer is not None:
+                try:
+                    if mathruler_grade_answer(predicted_answer, reference_text):
+                        return True, "mathruler"
+                except Exception:
+                    pass
+            return compare_answers(predicted_answer, reference_text, is_multiple_choice=False), "math_eval"
+
+        return compare_answers(predicted_answer, reference_text, is_multiple_choice=False), "text_compare"
+
+    @classmethod
+    def _evaluate_answer_alignment(cls, response: str, reference: Any) -> Dict[str, Any]:
+        reference_type, reference_supported = cls._infer_reference_type(reference)
+        extraction = cls._extract_final_answer_details(response, reference_type)
+        outcome_correct, comparison_method = cls._compare_final_answer(
+            extraction["predicted_answer"],
+            reference,
+            reference_type,
+            reference_supported,
+        )
+        return {
+            "reference_type": reference_type,
+            "reference_supported": reference_supported,
+            "comparison_method": comparison_method,
+            **extraction,
+            "outcome_correct": outcome_correct,
+        }
 
     @classmethod
     def _compute_relative_drop(cls, step_scores: torch.Tensor) -> Tuple[float, bool]:
@@ -2394,12 +2569,8 @@ class MathPRMReward(nn.Module):
         reference: Any,
         step_scores: torch.Tensor,
     ) -> Dict[str, float]:
-        reference_text = cls._safe_text(reference)
-        predicted_answer = cls._extract_final_answer(response)
-        is_multiple_choice = cls._is_multiple_choice_reference(reference_text)
-        outcome_correct = float(
-            compare_answers(predicted_answer, reference_text, is_multiple_choice=is_multiple_choice)
-        )
+        answer_eval = cls._evaluate_answer_alignment(response, reference)
+        outcome_correct = float(answer_eval["outcome_correct"])
         max_relative_drop, has_drop_moment = cls._compute_relative_drop(step_scores)
 
         final_reward = 0.0
@@ -2412,6 +2583,12 @@ class MathPRMReward(nn.Module):
             "max_relative_drop": max_relative_drop,
             "has_drop_moment": float(has_drop_moment),
             "final_reward": final_reward,
+            "answer_tag_present": float(answer_eval["answer_tag_present"]),
+            "answer_extraction_failed": float(answer_eval["answer_extraction_failed"]),
+            "used_answer_fallback": float(answer_eval["used_answer_fallback"]),
+            "reference_supported": float(answer_eval["reference_supported"]),
+            "used_mathruler": float(answer_eval["comparison_method"] == "mathruler"),
+            "reference_type_id": cls._REFERENCE_TYPE_TO_ID[answer_eval["reference_type"]],
         }
 
     # ------------------------------------------------------------------
@@ -2477,6 +2654,12 @@ class MathPRMReward(nn.Module):
             "max_relative_drop": [],
             "has_drop_moment": [],
             "final_reward": [],
+            "answer_tag_present": [],
+            "answer_extraction_failed": [],
+            "used_answer_fallback": [],
+            "reference_supported": [],
+            "used_mathruler": [],
+            "reference_type_id": [],
         }
         image_inputs = raw_images or [None] * len(prompt_and_output)
         ref_inputs = references or [None] * len(prompt_and_output)
@@ -2551,7 +2734,9 @@ class MathPRMReward(nn.Module):
                 batch_metrics["step_score_last"].append(0.0)
                 batch_metrics["step_count"].append(0.0)
                 for key in ("accuracy_reward", "outcome_correct", "max_relative_drop",
-                            "has_drop_moment", "final_reward"):
+                            "has_drop_moment", "final_reward", "answer_tag_present",
+                            "answer_extraction_failed", "used_answer_fallback",
+                            "reference_supported", "used_mathruler", "reference_type_id"):
                     batch_metrics[key].append(psgrpo_metrics[key] if label == "math_psgrpo" else 0.0)
                 continue
 
@@ -2576,7 +2761,9 @@ class MathPRMReward(nn.Module):
             batch_metrics["step_score_last"].append(float(step_scores[-1].item()))
             batch_metrics["step_count"].append(float(step_scores.numel()))
             for key in ("accuracy_reward", "outcome_correct", "max_relative_drop",
-                        "has_drop_moment", "final_reward"):
+                        "has_drop_moment", "final_reward", "answer_tag_present",
+                        "answer_extraction_failed", "used_answer_fallback",
+                        "reference_supported", "used_mathruler", "reference_type_id"):
                 batch_metrics[key].append(psgrpo_metrics[key] if label == "math_psgrpo" else 0.0)
 
         score_tensor = torch.tensor(batch_rewards, dtype=torch.float32, device=device)

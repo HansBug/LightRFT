@@ -15,7 +15,7 @@ if str(MATH_PRM_DIR) not in sys.path:
     sys.path.insert(0, str(MATH_PRM_DIR))
 
 from reward_models import MathPRMReward
-from reward_models_utils import RewardModelType, load_reward_models, mix_rewards
+from reward_models_utils import RewardModelType, load_reward_models, mix_rewards, reward_fn
 from lightrft.models.actor_vl import ActorVL
 from lightrft.utils.math_prm_output import sanitize_math_prm_response_text, should_stop_math_prm_response_text
 
@@ -406,6 +406,36 @@ class Phase2AlignmentTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["final_reward"].item(), 1.0, places=6)
         self.assertAlmostEqual(metrics["format_reward"].item(), 1.0, places=6)
 
+    def test_reward_fn_propagates_phase5_math_psgrpo_alignment_metrics(self):
+        reward, metrics = reward_fn(
+            model_reward_list=[torch.tensor([0.5], dtype=torch.float32)],
+            model_reward_metrics_list=[{
+                "model_reward": torch.tensor([0.48], dtype=torch.float32),
+                "outcome_correct": torch.tensor([1.0], dtype=torch.float32),
+                "max_relative_drop": torch.tensor([0.44], dtype=torch.float32),
+                "has_drop_moment": torch.tensor([1.0], dtype=torch.float32),
+                "answer_tag_present": torch.tensor([1.0], dtype=torch.float32),
+                "answer_extraction_failed": torch.tensor([0.0], dtype=torch.float32),
+                "used_answer_fallback": torch.tensor([0.0], dtype=torch.float32),
+                "reference_supported": torch.tensor([1.0], dtype=torch.float32),
+                "used_mathruler": torch.tensor([1.0], dtype=torch.float32),
+                "reference_type_id": torch.tensor([3.0], dtype=torch.float32),
+            }],
+            labels=["math_psgrpo"],
+            queries=["Step 1: Compute carefully.\n†Answer: 1/2"],
+            refs=["\\frac{1}{2}"],
+            label_map={"math_prm": 0},
+        )
+
+        self.assertAlmostEqual(reward.item(), 0.5, places=6)
+        self.assertAlmostEqual(metrics["model_reward"].item(), 0.48, places=6)
+        self.assertAlmostEqual(metrics["outcome_correct"].item(), 1.0, places=6)
+        self.assertAlmostEqual(metrics["max_relative_drop"].item(), 0.44, places=6)
+        self.assertAlmostEqual(metrics["has_drop_moment"].item(), 1.0, places=6)
+        self.assertAlmostEqual(metrics["answer_extraction_failed"].item(), 0.0, places=6)
+        self.assertAlmostEqual(metrics["used_mathruler"].item(), 1.0, places=6)
+        self.assertAlmostEqual(metrics["final_reward"].item(), 0.5, places=6)
+
     def test_mix_rewards_still_applies_global_format_reward_for_non_math_labels(self):
         labels = ["general"]
         model_scores = torch.tensor([[0.25]], dtype=torch.float32)
@@ -480,6 +510,58 @@ class Phase2AlignmentTests(unittest.TestCase):
         )
         self.assertAlmostEqual(incorrect["outcome_correct"], 0.0, places=6)
         self.assertAlmostEqual(incorrect["final_reward"], 0.0, places=6)
+
+    def test_phase5_alignment_handles_formula_equivalence_via_mathruler(self):
+        reward = _minimal_math_prm_instance()
+        alignment = reward._evaluate_answer_alignment(
+            response="Step 1: Simplify the fraction.\n†Answer: \\frac{1}{2}",
+            reference="1/2",
+        )
+
+        self.assertEqual(alignment["reference_type"], "numeric")
+        self.assertEqual(alignment["comparison_method"], "mathruler")
+        self.assertTrue(alignment["outcome_correct"])
+        self.assertEqual(alignment["predicted_answer"], "\\frac{1}{2}")
+
+    def test_phase5_alignment_avoids_extracting_intermediate_number_without_answer_tag(self):
+        reward = _minimal_math_prm_instance()
+        alignment = reward._evaluate_answer_alignment(
+            response=(
+                "Step 1: Let x = 6.\n"
+                "Step 2: Compute y = 5 * 6 + 7 = 37.\n"
+                "Step 3: Therefore we are done."
+            ),
+            reference="37",
+        )
+
+        self.assertFalse(alignment["answer_tag_present"])
+        self.assertTrue(alignment["answer_extraction_failed"])
+        self.assertEqual(alignment["predicted_answer"], "")
+        self.assertFalse(alignment["outcome_correct"])
+
+    def test_phase5_alignment_allows_explicit_last_line_fallback_for_multiple_choice(self):
+        reward = _minimal_math_prm_instance()
+        alignment = reward._evaluate_answer_alignment(
+            response="Step 1: Compare the four options.\nThe answer is B",
+            reference="B",
+        )
+
+        self.assertEqual(alignment["reference_type"], "multiple_choice")
+        self.assertTrue(alignment["used_answer_fallback"])
+        self.assertFalse(alignment["answer_extraction_failed"])
+        self.assertEqual(alignment["predicted_answer"], "B")
+        self.assertTrue(alignment["outcome_correct"])
+
+    def test_phase5_alignment_treats_missing_reference_as_unsupported(self):
+        reward = _minimal_math_prm_instance()
+        alignment = reward._evaluate_answer_alignment(
+            response="Step 1: Compute carefully.\n†Answer: 37",
+            reference="",
+        )
+
+        self.assertFalse(alignment["reference_supported"])
+        self.assertEqual(alignment["comparison_method"], "unsupported_reference")
+        self.assertFalse(alignment["outcome_correct"])
 
     def test_math_prm_forward_returns_phase4_psgrpo_metrics(self):
         processor = FakeMultiStepProcessor()
