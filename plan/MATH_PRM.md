@@ -683,94 +683,55 @@ Checklist：
 - 这一阶段允许 reward 先保持“基础版 math_prm”
 - 目标是先验证主链路可运行、日志可观测、显存和吞吐行为可接受
 
-当前结果（2026-03-19）：
+按轮修复记录（2026-03-19）：
 
-- 已完成一次严格按边界执行的 `time-boxed smoke run`：
+- 第 1 轮 smoke：
   - 启动脚本：`/data/LightRFT/examples/math_prm/run_phase3_smoke.sh`
   - 训练日志：`/data/LightRFT/tmp/ursa_stage3/phase3_smoke/phase3_smoke_20260319_005513.log`
-- 当前结论不是“脚本未崩即通过”，而是：
-  - **主链路已打通**
-  - **本次 smoke run 健康性判定为失败**
-- 已确认打通的链路包括：
-  - dataloader 正常起批
-  - 多模态 actor rollout 正常返回
-  - reward model 在训练环节拿到 `prompt_and_output / raw_images / references`
-  - trainer 正常打印 `reward / kl / pg / response_length / total_length`
-  - smoke run 结束后相关进程已清理，8 张 GPU 已回收为 `1 MiB`
-- 这次判定为失败的直接原因包括：
-  - 第一批 rollout 的 `step 0 generate length` 仍然是 `min=max=mean=1024`
-  - 第一批样例生成出现 `StepStep 1:` 和大段 `"Camp Miniwauca"` 异常重复拖尾
-  - 第二批样例虽然中前段推理和答案 `37` 看起来正确，但后续继续出现大段 `7777...` 拖尾，并重复输出 `†Answer: 37...`
-  - `response_length` 持续在 `943 ~ 946` token，高于“健康 smoke”应有的紧凑回答形态
-  - `format_reward=1.0` 不能掩盖生成文本已经明显跑偏，因此不能将本次试跑记为通过
-- 这次 smoke run 中可确认的正向信号包括：
-  - reward 不再是全 `0` / 全 `1` / 单一常数
-  - `kl` 为有限值，且从 `0 -> 0.0251 -> 0.0585`
-  - `pg` / `ret` / `model_reward_mean` 均有正常数值输出
-  - 没有出现 OOM、死锁、图像载入失败或 reward 全零
+  - 结果：主链路已打通，但健康性判定失败
+  - 暴露问题：
+    - dataloader / rollout / reward / PPO / cleanup 已经都能走通
+    - 但首批 `step 0 generate length` 仍是 `min=max=mean=1024`
+    - 输出中出现 `StepStep 1:`、`Camp Miniwauca`、`7777...`、重复 `†Answer:`
+    - `response_length` 持续在 `943 ~ 946`
+  - 结论：当时的主要问题仍然是 stopping / 结构化输出异常，而不是训练脚本本身不能跑
 
-Phase 3 范畴内修复后的第二次 smoke（2026-03-19）：
-
-- 试跑日志：`/data/LightRFT/tmp/ursa_stage3/phase3_smoke/phase3_smoke_20260319_091453.log`
-- 本轮修复保持在 Phase 3 范畴内，没有提前引入 Phase 4 的 correctness / drop-moment / `math_prm_combined`
-- 本轮实际加入的修复包括：
-  - 更严格的 system prompt，明确要求首个 `†Answer:` 后立即停止
-  - 更保守的 smoke decode 参数：`temperature=0.8`、`top_p=0.95`、`top_k=50`、`repetition_penalty=1.05`、`no_repeat_ngram_size=4`
-  - 仅对 `math_prm` / `math_prm_combined` 生效的 rollout 后处理：对首个 `†Answer:` 后的异常拖尾做截断，并清理 `StepStep 1:` / 重复 answer marker / 重复字符尾巴
-- 这次 smoke 的直接结果是：
-  - 第一批和第二批都触发了 postprocess 截断
-  - 第一批 `sanitized 2/2 outputs`，平均裁掉 `927.5` token，最大裁掉 `953`
-  - 第二批 `sanitized 2/2 outputs`，平均裁掉 `904.0` token，最大裁掉 `934`
-  - 第一批样例已不再出现 `Camp Miniwauca` 长重复尾巴，输出恢复为干净的 `Step ... / †Answer: yes`
-  - 第二批样例已不再出现 `7777...` 和重复 `†Answer:`，输出恢复为单个 `†Answer:` 行
-  - 训练侧长度指标明显回落：
+- 第 2 轮 smoke：
+  - 训练日志：`/data/LightRFT/tmp/ursa_stage3/phase3_smoke/phase3_smoke_20260319_091453.log`
+  - 本轮修复保持在 Phase 3 范畴内，没有提前引入 Phase 4 的 correctness / drop-moment / `math_prm_combined`
+  - 本轮修复动作：
+    - 收紧 system prompt，明确要求首个 `†Answer:` 后立即停止
+    - 收紧 smoke decode 参数：`temperature=0.8`、`top_p=0.95`、`top_k=50`、`repetition_penalty=1.05`、`no_repeat_ngram_size=4`
+    - 给 `math_prm` / `math_prm_combined` 增加 rollout 后处理：首个 `†Answer:` 后截断，并清理 `StepStep 1:` / 重复 answer marker / 重复字符尾巴
+  - 结果：
+    - `Camp Miniwauca` / `7777...` / 重复 `†Answer:` 已被压下
     - 第一批 `rollout_response_length=88`
     - 第二批 `rollout_response_length=117`
-    - 汇总统计 `Response Length = 117.0 ± 42.4`，`hit_max=0.0000`
-  - 训练侧 metrics 重新回到可读范围：
-    - 第一批 train `glen=104/124`，`tlen=264/287`，`kl=0 -> 0.0234`
-    - 第二批 train `glen=130/145`，`tlen=298/313`，`kl=0.0148 -> 0.0241`
-  - smoke 结束后相关进程已清理，8 张 GPU 已再次回收到 `1 MiB`
+    - 训练侧长度和 `kl` 已回到可读范围
+  - 剩余问题：
+    - raw generate 在进入 postprocess 前仍会顶满 `1024`
+    - 内容正确性仍然偏弱，例如样例输出 `41` 而不是 reference `37`
+    - reward 仍偏低
 
-但这次还不能简单记成“Phase 3 完全通过”，原因也需要明确保留：
+- 第 3 轮 smoke：
+  - 训练日志：`/data/LightRFT/tmp/ursa_stage3/phase3_smoke/phase3_smoke_20260319_095529.log`
+  - 本轮修复动作：
+    - 把 stopping 往前推到 HF 本地生成阶段本身
+    - 让结构化 answer 规则在 generation-time 就尝试收尾到 `eos`
+    - 修正 local HF inference 的 `output_token_ids` 截取，不再把 `eos` 后 padding 误算成生成长度
+  - 结果：
+    - 首批 `step 0 generate length` 从伪 `1024` 降到 `min=60`、`max=256`、`mean=120.25`
+    - postprocess 只剩 `sanitized 1/2 outputs`
+    - 而且只裁掉 `2` 个 token
+    - 第一批输出仍保持干净的 `Step ... / †Answer: yes`
+    - 第一批 `rollout_response_length=87`
+  - 结论：
+    - Phase 3 的 stopping / 长尾乱码主问题已经基本压住
+    - 剩余主要矛盾已经转成答案正确性和 PRM reward 偏低
 
-- raw generate 在进入 postprocess 前，第一批仍然出现 `step 0 generate length = 1024`
-- 第二批虽然格式已被修回正常，但样例解题内容本身仍然答错了，输出成了 `41` 而不是 reference `37`
-- 本轮 reward 也明显偏低：
-  - 第二批 `model_scores` 只有 `0.0192` 和 `0.0011`
-  - 汇总 `Total Reward = 0.0101 ± 0.0128`
-- 因此当前状态应记录为：
-  - **Phase 3 的“明显异常长尾 / 乱码 / 重复 answer marker”问题，已在本阶段内被显著压下**
-  - **Phase 3 的训练侧 metrics 已从“明显异常”恢复到“可继续观察与迭代”**
-  - **但 raw generation 仍有强烈超长倾向，且答案正确性/PRM 分数仍偏弱，因此还不应直接视为最终健康通过**
+Phase 3 现状（最新）：
 
-Phase 3 范畴内修复后的第三次 smoke（2026-03-19）：
-
-- 试跑日志：`/data/LightRFT/tmp/ursa_stage3/phase3_smoke/phase3_smoke_20260319_095529.log`
-- 这次新增的修复重点不是 reward，而是把 stopping 再往前推到 HF 本地生成链路本身：
-  - 让结构化 answer 规则在 generation 时就尝试强制收尾到 `eos`
-  - 修正 local HF inference 里 `output_token_ids` 的截取方式，不再把 `eos` 后的整段 padding 一起误算成“生成长度”
-- 本轮 smoke 在拿到足够判断健康度的首批日志后主动停止，并清理了相关进程与 GPU
-- 这轮最关键的变化是：
-  - 第一批 `step 0 generate length` 不再是伪 `1024`
-  - 实际变为：`min=60`、`max=256`、`mean=120.25`、`median=105`
-  - 说明 generation-time stopping / output trimming 已经把“首批 raw generate 结构性顶满上限”的问题显著压下
-- 同时：
-  - postprocess 只剩 `sanitized 1/2 outputs`
-  - 而且只裁掉了 `2` 个 token
-  - 这和上一轮动辄裁掉 `900+` token 相比，说明当前 stopping 已不再主要依赖后处理兜底
-- 第一批样例输出仍保持干净的 `Step ... / †Answer: yes`
-- 第一批 `rollout_response_length=87`，仍处于上一轮已经恢复出的健康短响应区间
-
-因此，Phase 3 当前状态应再往前更新一档：
-
-- **raw generation 顶满 `1024` 的主问题，在最新 smoke 首批里已被修复到基本可控**
-- **当前主要剩余问题，已经从“结构化 stopping 异常”转移到“答案正确性弱、PRM reward 偏低”**
-- **后续 Phase 3 继续迭代时，应把关注点更多放到 prompt/data 对齐与正确性质量，而不是继续把主要时间花在长尾乱码收尾上**
-
-Phase 3 当前总结（2026-03-19）：
-
-- 当前阶段状态可以概括为：
+- 当前状态可以概括为：
   - **训练主链路已打通**
   - **结构化输出与 stopping 问题已基本修住**
   - **还不能记为最终健康通过**
@@ -781,70 +742,23 @@ Phase 3 当前总结（2026-03-19）：
   - 生成长度已经回到合理区间
   - 但模型答案质量还没有稳定到可以直接宣告 Phase 3 结束
 
-这几轮里实际采用的修复方法也需要统一记录为：
+Phase 3 建议（最新）：
 
-- 第一步：确认问题主要不在 Phase 4 缺失，而在 Phase 3 自身的 rollout / decode / stopping
-  - 依据是最早那批异常输出发生在第一次 PPO 更新前
-- 第二步：先用 Phase 3 范畴内的 postprocess 兜底
-  - 对 `math_prm` / `math_prm_combined` 输出做首个 `†Answer:` 后截断
-  - 清理 `StepStep 1:`、重复 `†Answer:`、重复字符尾巴、长重复词串
-- 第三步：收紧 smoke decode 参数
-  - 使用更保守的 `temperature / top_p / top_k / repetition_penalty / no_repeat_ngram_size`
-- 第四步：把 stopping 再前推到 HF 本地生成阶段本身
-  - 不再只依赖 postprocess 收尾
-  - 在 generation-time 触发结构化 answer 规则并强制向 `eos` 收尾
-- 第五步：修正 local HF inference 的输出截取
-  - 不再把 `eos` 后面的 padding 误记进 `output_token_ids`
-  - 从而让 `step 0 generate length` 和后续统计回到真实值
-
-这些修复之后，问题演变可以概括为：
-
-- 最开始的问题：
-  - raw generate 固定顶满 `1024`
-  - 输出里有 `Camp Miniwauca`、`7777...`、重复 `†Answer:`、`StepStep 1:`
-- 中间状态：
-  - 依靠 postprocess 已能把脏尾巴裁掉
-  - 训练侧 `response_length` 已明显恢复
-  - 但 raw generate 本身仍然假性顶满
-- 当前状态：
-  - raw generate 长度本身已降到合理范围
-  - postprocess 只剩轻量补边角
-  - Phase 3 的主要矛盾已经转成“如何把答案质量和 reward 拉起来”
-
-对当前异常原因的判断（2026-03-19）：
-
-- 当前判断是：**Phase 3 异常生成的主因，不是因为 Phase 4 的 PS-GRPO / correctness / drop-moment 还没上**
-- 直接依据是：异常输出出现在第一次 PPO 更新之前
-  - 训练日志 `/data/LightRFT/tmp/ursa_stage3/phase3_smoke/phase3_smoke_20260319_005513.log` 中，先看到首批 rollout 的异常输出和 `step 0 generate length = 1024`
-  - 真正 actor 训练日志是在之后才开始打印
-  - 因此 `StepStep 1:`、`Camp Miniwauca`、`7777...` 这些异常，不可能是 Phase 4 reward 公式缺失“制造出来”的
-- 但也需要明确：
-  - **Phase 4 没上，确实会让这些异常更难被 reward 压下去**
-  - 它是“放大器”或“缺少额外约束”，不是当前第一次 rollout 就异常的首因
-
-当前更可能的原因排序：
-
-- 高优先级怀疑：rollout stopping / decoding / structured-format 对齐不够
-  - 首批 rollout 直接顶满 `generate_max_len=1024`
-  - 说明当前 prompt + decode 行为下，模型不会稳定在首个 `†Answer:` 后自然停下
-- 中高优先级怀疑：Phase 3 baseline reward 对“答完后继续拖尾”惩罚不够
-  - 本阶段 reward 明确定义为 `min(step_scores)`
-  - `math_prm` 路径下全局 `format_reward` 已不参与最终 reward
-  - 因此如果前面几步和首个答案行看起来还像样，后面即使继续胡写，仍可能拿到不低分数
-- 中优先级怀疑：full-data 样本分布与当前 system prompt 有一定错位
-  - 例如日志里首条样本是图像问答式的 `Is the landscape flat?`
-  - 但当前 system prompt 强约束成“math question + Step N + †Answer”
-  - 这种 schema / prompt 张力会放大异常 completion
-- 低优先级怀疑：单纯因为 Phase 4 算法还没实现
-  - 这不足以解释“第一次 PPO 更新前就已经出现异常长尾”
-
-因此，Phase 3 内的修复优先级需要固定为：
-
-- 先修 prompt / stopping / truncation / decode hygiene
-- 先确认首个 `†Answer:` 后能稳定停下，或至少能在训练侧被安全截断
-- 先确认 `response_length`、样例输出质量、`reward / kl / loss` 重新朝正常方向前进
-- **不要**把 Phase 4 的 correctness / drop-moment 提前混入，用 reward 升级去掩盖 Phase 3 的 rollout 结构问题
-- 如果 Phase 3 在这些修复后仍然异常，再进入 Phase 4 时再评估 reward 盲区对训练趋势的二次影响
+- 现在可以开始 `Phase 4`
+- 直接原因是：Phase 3 当前剩下的问题，已经主要落在 `Phase 4` 的职责范围里，也就是 reward 对“答对/答错”的判别能力，而不再是 rollout 结构性故障
+- 当前判断仍然保持：
+  - **最早那批异常输出的首因，不是 Phase 4 没上**
+  - 依据是异常输出发生在第一次 PPO 更新之前
+  - 但在 Phase 3 的 stopping 问题已经基本压住之后，Phase 4 现在比之前更有机会真正发挥作用
+- 当前对进入 Phase 4 的效果评估是：
+  - `70% ~ 80%` 概率：会明显改善 reward 对错题/对题的区分能力
+  - `50% ~ 60%` 概率：会带来可见的训练趋势改善
+  - 但它更可能先改善“训练信号是否对”，不保证一上来就把模型答案质量整体拉正
+- 因此当前建议是：
+  - 保留 Phase 3 已完成的 stopping / truncation / decode hygiene 修复不回退
+  - 在此基础上进入 Phase 4，实现 correctness + drop-moment + 最终 PS-GRPO reward 语义
+  - 第一轮 Phase 4 smoke 中必须把 `min(step_scores)`、`outcome_correct`、`max_relative_drop`、`has_drop_moment`、`final_reward` 分开打日志
+  - 如果 obvious wrong answers 仍然能拿到高 `final_reward`，优先检查答案抽取和 reference 对齐，而不是先怀疑 PPO 本身
 
 Phase 3 的试跑边界需要额外固定为：
 
