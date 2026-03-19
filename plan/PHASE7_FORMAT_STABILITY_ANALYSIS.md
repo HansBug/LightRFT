@@ -1,418 +1,289 @@
-# Phase 7 格式稳定性问题分析
+# Phase 7 格式稳定性问题排查与修复记录
 
-本文档记录 `Phase 7` bounded full-data observation 中暴露出来的“格式稳定性未通过”问题，解释这里的“格式稳定性”到底指什么，为什么当前不能把这轮训练视为健康 baseline，以及真实样本里具体出现了哪些异常。
+本文档记录 `Phase 7` 从“格式稳定性未通过”到“真实观测重新健康通过”的完整排查过程。结论先说：
 
-## 1. 背景
+- 这不是 `URSA` 模型本身天然会输出乱码
+- 真正根因在 `LightRFT` 本地 `hf` rollout 的多模态批量输出收集逻辑
+- `math_psgrpo` 早期还漏掉了 `structured_answer_stop`
+- 中间用过的 `per-sample fallback` 只能止血，不能作为最终方案，因为会把 8 卡观测拖到 timeout
+- 最终修复后，`Phase 7` 最新观测已经恢复到 `healthy_pass = true`
+- 但这不等于推理性能已经优秀；当前 8 卡 bounded run 仍然存在明显的 rollout 速度偏慢问题
 
-`Phase 7` 最终真实观测运行如下：
+## 1. 历史现象
+
+最早暴露问题的真实观测是：
 
 - 训练日志：
   - `/data/LightRFT/tmp/ursa_stage3/phase7_observation/phase7_observation_20260319_205242.log`
 - 观测摘要：
   - `/data/LightRFT/tmp/ursa_stage3/phase7_observation/phase7_summary_20260319_205242.json`
-- trajectory 文件：
+- 轨迹文件：
   - `/data/LightRFT/results/lightrft-ursa8b-stage3-phase7-observation/lightrft-ursa8b-stage3-phase7-observation-ep1-kl0.003-lr2e-6-20260319_205243/trajectories/trajectories_step_1.json`
 
-这轮 run 已经证明：
-
-- `hf` rollout 正常工作
-- `math_psgrpo` reward 正常参与训练
-- PPO update 已真实发生
-- trajectory 保存已经正常落盘
-- 离线分析可以直接读取这些轨迹并做 Phase 7 指标统计
-
-所以当前的问题不是“训练跑不起来”，而是“输出质量是否足够健康”。
-
-## 2. 这里的“格式稳定性”是什么意思
-
-这里的“格式稳定性”，不是只看回答里有没有出现 `Step` 和 `†Answer:`。
-
-更准确地说，它指的是：
-
-- 模型是否能持续使用 `Step N:` 结构输出推理
-- 模型是否只输出一个最终 `†Answer:`
-- 模型是否会在 `†Answer:` 后干净停止
-- 模型是否会在尾部继续生成垃圾字符、重复 token、重复 answer marker
-- 同样的格式要求下，是否大多数样本都能稳定满足，而不是“一部分正常、一部分漂移”
-
-当前 `Phase 7` 的严格格式检查逻辑在：
-
-- `/data/LightRFT/examples/math_prm/analyze_phase7_observation.py`
-
-其中 `is_valid_stage3_format(text)` 的判定要点是：
-
-- 至少出现一个 `Step N:`
-- `†Answer:` 行必须恰好只有一个
-- 最后一个非空行必须以 `†Answer:` 开头
-
-注意：
-
-- 这已经比训练中较宽松的 `format_reward` 更严格
-- 但即便通过这个严格检查，也不一定等于“人工看起来已经完全干净”
-
-## 3. 为什么当前会说“健康性未通过”
-
-`Phase 7` summary 里最终结论是：
+这轮结论是：
 
 - `healthy_pass = false`
+- `format_success_ratio = 0.75`
 
-唯一保留下来的问题项是：
-
-- `生成格式成功率偏低：format_success_ratio=0.7500`
-
-也就是说：
-
-- 保存下来的 `4` 条 trajectory 中
-- 只有 `3` 条通过了当前的严格格式 validator
-- 还有 `1` 条是明确硬失败
-
-但从人工检查的角度看，实际上这 `3` 条“通过”的样本也并不干净，它们仍然带有明显尾巴污染，只是还没有触发严格 validator 的“唯一 `†Answer:` + 最后一行是 answer”硬失败条件。
-
-所以：
-
-- `0.75` 已经说明当前格式稳定性不达标
-- 而真实体感质量其实比 `0.75` 这个数字表现得更差一些
-
-## 4. 真实输出样本
-
-以下样本都来自：
-
-- `/data/LightRFT/results/lightrft-ursa8b-stage3-phase7-observation/lightrft-ursa8b-stage3-phase7-observation-ep1-kl0.003-lr2e-6-20260319_205243/trajectories/trajectories_step_1.json`
-
-### 样本 0
-
-```text
-StepStep 1: Observe the image. The image shows a long expanse of a plain or field in the foreground.
-
-Step 2: Analyze the horizon. The horizon line is clearly visible and shows a level plane.
-
-Step 3: Consider the perspective. The perspective of the image is from a height, looking down towards the horizon, which further supports the observation of a flat landscape.
-
-†Answer: yes7777777777777777777777777777777777...
-```
-
-问题：
-
-- `StepStep 1:`，step header 已经出现轻微漂移
-- `†Answer:` 后面不是干净的 `yes`
-- `†Answer:` 后面继续拖着大段 `7777...`
-
-当前严格 validator 仍把它判为 `True`，因为：
-
-- 只有一个 `†Answer:`
-- 最后一条非空行仍然是 `†Answer: ...`
-
-但人工看，这显然不是一个健康、稳定的收尾格式。
-
-### 样本 1
-
-```text
-StepStep 1: Observe the image. The image shows a clear sky with a cloud, two planes on the ground, and a plain backdrop.
-
-Step 2: Analyze the backdrop. The backdrop is a relatively flat expanse of land, consistent with a plain.
-
-Step 3: Consider the cloud. The cloud is small and doesn't significantly distract from the overall impression of a flat landscape.
-
-Step 4: Conclude. Based on the observation and analysis, the landscape in the image is flat.
-
-†Answer: yes, no need to answer777777777777777777777777...
-```
-
-问题：
-
-- 仍然是 `StepStep 1:`
-- `†Answer:` 行本身已经不干净，混入了 `no need to answer`
-- 后面继续拖了长串 `7777...`
-
-这条在严格 validator 下仍判为 `True`，但它依然不是“健康格式”。
-
-### 样本 2
-
-```text
-StepStep 1: Observe the image provided. The image shows a desert landscape with a hilly area in the background.
-
-Step 2: Analyze the landscape. The majority of the visible landscape is flat, but there are noticeable hills and a sparse distribution of vegetation.
-
-Step 3: Determine the answer. Based on the observation and analysis, the landscape is not perfectly flat, but it is mostly flat.
-
-†Answer: Mostly flatFrealth777877788888888888...
-
-†Answer: Mostly flat777888888888888888...
-```
-
-这是当前最典型的“格式稳定性硬失败”样本。
-
-问题：
-
-- 再次出现 `StepStep 1:`
-- 第一个 `†Answer:` 后尾巴已经污染
-- 更严重的是又重新起了第二个 `†Answer:`
-
-这条会被严格 validator 判为 `False`，因为：
-
-- `†Answer:` 不再唯一
-
-这类样本说明模型在输出 final answer 后没有稳定停住，而是继续生成，并重新开启了一段 answer。
-
-### 样本 3
-
-```text
-StepStep 1: Observe the image. The image shows a plain with a light at the horizon and two airplanes.  The main focus is the helicopter.
-
-Step 2: Analyze the context. The context is not explicitly provided in the prompt, but the image suggests a landscape.
-
-Step 3: Determine the nature of the roles. The prompt does not provide individual roles, only that the answer is "no".
-
-Step 4: Conclude the answer based on the lack of information. ...
-
-†Answer: no777777777777777777777777777777...
-```
-
-问题：
-
-- `StepStep 1:` 仍存在
-- `†Answer:` 后仍有长尾垃圾 token
-
-这条在严格 validator 下仍判为 `True`，但也不能算“真正干净”。
-
-## 5. 为什么训练日志里的 `Format Reward = 1.0` 还不够
-
-在训练日志里：
-
-- `/data/LightRFT/tmp/ursa_stage3/phase7_observation/phase7_observation_20260319_205242.log`
-
-可以看到：
-
-- `Format Reward      1.0000 ± 0.0000`
-
-这并不代表“格式已经健康”。
-
-原因是：
-
-- 训练里的 `format_reward` 规则比较宽松
-- `Phase 7` 离线分析里的 `is_valid_stage3_format(...)` 更严格
-- 人工检查又比严格 validator 更能识别尾巴污染和弱漂移
-
-所以当前存在三层标准：
-
-1. 训练期较宽松的 `format_reward`
-2. Phase 7 较严格的结构 validator
-3. 人工直观质量检查
-
-这三层不是同一个东西。
-
-当前观测说明：
-
-- 在训练期宽松规则下，4/4 看起来都“像是正确格式”
-- 在 Phase 7 严格规则下，只有 3/4 通过
-- 在人工直观质量上，这 4 条都还有明显格式污染问题
-
-## 6. 当前问题的本质
-
-当前不是：
-
-- rollout 引擎坏了
-- reward 模型坏了
-- 图像没参与
-- answer extraction 失效
-- 训练一开始就崩
-
-这些在 `Phase 7` 里都已经被证明不是主问题。
-
-当前更准确的问题是：
-
-- 模型已经学会了大致的 `Step ... / †Answer ...` 外形
-- 但还没有学会稳定、干净地在 `†Answer:` 处收尾
-
-所以它经常表现为：
+真实样本里出现过这些问题：
 
 - `StepStep 1:`
-- `†Answer:` 后继续乱写
-- 重复 token 尾巴，如 `7777...`
-- 偶尔重新起一个第二次 `†Answer:`
+- `†Answer:` 后继续拖 `7777...`
+- 重复第二个 `†Answer:`
+- 明明已经给出 final answer，还继续往后生成尾巴
+
+也就是说，当时不是“训练跑不起来”，而是“训练能跑，但输出收尾不稳定”。
+
+## 2. 为什么怀疑不是 URSA 本体问题
+
+我用和 `Phase 7` 完全相同的真实样本，在当前仓库兼容过的 URSA runtime 上单独跑过纯推理，对照过：
+
+- `greedy_helpful`
+- `greedy_stage3`
+- `sample_stage3`
+- 直接 `model.generate()`
+
+观察到的现象是：
+
+- 同一张图、同一条问题，在纯 `URSA` 推理下不会自然复现 `7777...`
+- 也不会自然复现第二个 `†Answer:`
+- 输出通常能干净停在 `†Answer: ...`
+
+因此，问题更像是：
+
+- `LightRFT` 侧 rollout / stopping / 输出收集链路的问题
+- 而不是 `URSA` checkpoint 本身“天生坏掉”
+
+## 3. 第一层问题：`math_psgrpo` 没有吃到 structured stop
+
+早期排查时发现：
+
+- `lightrft/utils/math_prm_output.py` 里 `MATH_PRM_STRUCTURED_LABELS` 只有
+  - `math_prm`
+  - `math_prm_combined`
+- 但 `Phase 7` 实际跑的是
+  - `math_psgrpo`
+
+这意味着当时真实训练里：
+
+- `structured_answer_stop` 实际没有启用
+- `math_prm_postprocess` 的结构化清理也没有启用
+
+这会直接放大：
+
+- `†Answer:` 后继续生成
+- 重复 answer marker
+- 尾巴污染
+
+这部分后来已修复：
+
+- `math_psgrpo` 已加入 structured label 集合
+
+## 4. 第二层问题：中间的 per-sample fallback 只是止血，不是根治
+
+为了先验证问题是否来自 batched 多模态 generate，我一度在 `StrategyBase.engine_generate_local(...)` 里给 URSA 多模态 batched prompt 做了 `per-sample fallback`。
+
+这个方案的效果是：
+
+- 最小 `hf` rollout 校验能恢复正常输出
+- `Step 1: Observe` 这类异常截断不再出现
+
+但它有一个明显副作用：
+
+- 8 卡 `Phase 7` 真实观测会变得非常慢
+
+对应的失败 run 是：
+
+- 日志：
+  - `/data/LightRFT/tmp/ursa_stage3/phase7_observation/phase7_observation_20260319_231136.log`
+- 摘要：
+  - `/data/LightRFT/tmp/ursa_stage3/phase7_observation/phase7_summary_20260319_231136.json`
+
+这轮的结果是：
+
+- `healthy_pass = false`
+- `issues = ["本次 Phase 7 观测没有形成有效训练样本，trajectory 和训练进度指标都为空"]`
 
 也就是说：
 
-- 现在的问题不再是“不会按格式输出”
-- 而是“会按格式输出，但不能稳定、干净、可重复地按格式结束”
+- fallback 修住了格式异常
+- 但把真实 8 卡 observation 拖到了 20 分钟 timeout，不能作为最终实现
 
-## 7. 对健康性结论的正确理解
+## 5. 最终根因：左 padding 批次里按统一 prompt 长度切输出，导致短样本前缀被截掉
 
-因此，当前 `Phase 7` 的结论应该理解为：
+最终定位到的真正根因在：
 
-- 训练链路已经可观测、可分析、可保存
-- 当前已经能做真实的 bounded full-data run
-- 当前 reward/trajectory/多模态检查都能给出有效统计
-- 但这轮结果还不能作为“健康 baseline”
+- `/data/LightRFT/lightrft/strategy/strategy_base.py`
 
-原因不是系统挂了，而是：
-
-- 输出格式一致性还不够
-- final answer 收尾还不稳定
-
-## 8. 当前最明确的下一步
-
-在进入后续阶段前，当前最值得优先处理的是：
-
-- 继续提高 `format_success_ratio`
-- 压掉 `†Answer:` 后的长尾乱码
-- 压掉重复 `†Answer:`
-- 进一步收敛 `StepStep 1:` 这类 header 漂移
-
-## 9. 与纯 URSA 推理的对比结论
-
-为了判断问题到底更像“URSA 模型本身”还是“LightRFT rollout 包装逻辑”，我又额外做了一轮对照排查。
-
-### 9.1 直接跑 `/home/ubuntu/URSA-MATH` 原仓库示例
-
-我尝试运行了：
-
-- `/home/ubuntu/URSA-MATH/examples/run_ursa_8b_torch_example.py`
-- `/home/ubuntu/URSA-MATH/examples/run_ursa_8b_torch_example_standalone.py`
-
-在当前环境里，这两条都没有直接跑通，都会报：
-
-```text
-ModuleNotFoundError: No module named 'attrdict'
-```
-
-这说明：
-
-- 原仓库文档里“已验证成功输出”的结果依赖它自己的原始环境
-- 在当前这套通用环境里，不能直接把 `/home/ubuntu/URSA-MATH` 原仓库示例当成“开箱即用基线”
-- 当前仓库里已经兼容过的 `examples/math_prm/ursa_model` 反而是更可直接复现的 URSA 运行时
-
-### 9.2 在当前仓库里直接用兼容版 `ursa_model` 做同一条样本推理
-
-我选用了和 `Phase 7` 完全相同的真实样本：
-
-- 图片：
-  - `/home/ubuntu/URSA-MATH/datasets/URSA-MATH/images/data_images/VQA2.0/images/156768.jpg`
-- 问题：
-  - `Is the landscape flat?`
-
-并在当前仓库里直接调用兼容版：
-
-- `/data/LightRFT/examples/math_prm/ursa_model`
-
-做了三种对照：
-
-1. `greedy_helpful`
-2. `greedy_stage3`
-3. `sample_stage3`
-
-结果：
-
-- 三种都能输出干净的 `Step ... / †Answer ...`
-- 没有出现 `7777...`
-- 没有出现第二个 `†Answer:`
-
-其中 `sample_stage3` 的典型输出是：
-
-```text
-Step 1: Observe the image. ...
-
-Step 2: Analyze the ground. ...
-
-Step 3: Determine the answer. ...
-
-†Answer: no
-```
-
-### 9.3 进一步把 `max_new_tokens` 拉到 `1024` 做多次采样
-
-为了排除“只是因为我前面设置得太保守”，我又在同一条真实样本上直接做了：
-
-- `do_sample=True`
-- `temperature=1.0`
-- `top_p=1.0`
-- `max_new_tokens=1024`
-
-连续采样 `4` 次。
-
-结果仍然是：
-
-- 所有输出都干净
-- 长度大约只有 `71 ~ 101` tokens
-- 没有任何一个 hitting `1024`
-- 没有 `7777...`
-- 没有第二个 `†Answer:`
-
-这说明：
-
-- 同一个模型
-- 同一个图片
-- 同一个问题
-- 同类 Stage 3 system prompt
-
-在**纯 `model.generate()`** 路径下，并不会自然复现 `Phase 7` 里那种长尾乱码。
-
-### 9.4 与当前 LightRFT rollout 路径再对照
-
-我还复跑了：
-
-- `/data/LightRFT/examples/math_prm/check_hf_rollout.py --max-new-tokens 1024`
-
-结论有两个：
-
-1. `rollout_outputs` 与 `direct actor.generate()` 逐 token 完全一致  
-   也就是说，这个脚本证明：
-   - 当前本地 HF rollout 路径没有“额外改写输出”
-   - rollout 和 actor.generate 在这条检查路径下是对齐的
-
-2. 但在这条检查路径下，又出现了明显异常  
-   例如 `vqa_flatness` 这条样本的输出只有：
-
-```text
-Step 1: Observe
-```
-
-这说明：
-
-- 当前 LightRFT 自定义的 structured stopping 逻辑，本身就存在“异常早停/异常截断”的风险
-
-### 9.5 代码级定位
-
-继续追代码后，我发现了一个很关键的问题：
-
-- `/data/LightRFT/lightrft/utils/math_prm_output.py`
-
-里当前的：
+旧逻辑大意是：
 
 ```python
-MATH_PRM_STRUCTURED_LABELS = frozenset({"math_prm", "math_prm_combined"})
+output_start_idx = padded_input_ids.size(1)
+total_length = int(attention_mask_out[idx].sum().item())
+output_token_ids = sequences[idx, output_start_idx:total_length].tolist()
 ```
 
-**并不包含 `math_psgrpo`。**
+这里有一个关键问题：
 
-而 `Phase 7` 跑的实际 label 恰恰是：
+- `padded_input_ids.size(1)` 是整个 batch 里统一的最大 prompt 长度
+- 但 `attention_mask_out[idx].sum()` 统计的是“该行真实 prompt token 数 + 生成 token 数”
+- 对于左 padding 后较短的那一行，`total_length` 会天然比 `output_start_idx + 真实生成长度` 小一截
 
-- `math_psgrpo`
+结果就是：
 
-这意味着：
+- 短 prompt 行最前面的若干生成 token 被直接裁掉
+- 于是外部看到的输出会像是只剩：
+  - `Step 1: Observe`
+  - 或者 answer 行前半截消失
 
-- `Phase 7` 真实训练里，`structured_answer_stop` 实际没有启用
-- 所以 Phase 7 中看到的长尾乱码，至少有一部分是因为 `math_psgrpo` 这条路径根本没吃到 stopping 保护
+这解释了两个之前看起来很奇怪的现象：
 
-与此同时，`check_hf_rollout.py` 又表明：
+1. 为什么 pure URSA 单独生成没问题，但 LightRFT batched rollout 会异常截断
+2. 为什么 `per-sample fallback` 能“修好”问题
+   - 因为 batch size 退化成 1 以后，不再存在“统一最大 prompt 长度”和“每行真实 prompt 长度”之间的差值
 
-- 当 structured stop 被强制打开时
-- 当前 `_StructuredAnswerEosLogitsProcessor + should_stop_math_prm_response_text(...)`
-- 又可能过早触发，造成过短输出
+所以真正的问题不是：
 
-### 9.6 当前最可信的判断
+- batched generate 本身坏了
 
-基于这一轮对照，当前最可信的结论是：
+而是：
 
-1. `URSA` 模型本身不是“天然就会输出 7777...`
-2. 当前 `Phase 7` 里的长尾和格式漂移，更像是 `LightRFT` 侧的 rollout / stopping 集成问题
-3. 具体至少有两层问题：
-   - `math_psgrpo` 没被纳入 `structured_answer_stop`
-   - 当前 structured stop 本身又可能过早截断
+- batched generate 的**输出切片逻辑错了**
 
-所以接下来的“全面修复”，不应该只盯着模型本身，而应该优先修：
+## 6. 最终修复
 
-- `math_psgrpo` 的 stopping 覆盖
-- structured stop 的触发条件与实现细节
+最终落地的修复分成四块：
 
-换句话说，下一步要解决的已经不是“能不能跑”，而是“跑出来的东西能不能稳定像样”。
+1. `math_psgrpo` 纳入 structured label
+   - 文件：`/data/LightRFT/lightrft/utils/math_prm_output.py`
+
+2. `structured_answer_stop` 支持短代数答案
+   - 例如 `†Answer: y = 41`
+   - 文件：`/data/LightRFT/lightrft/utils/math_prm_output.py`
+
+3. 修正本地 `hf` rollout 的输出切片
+   - 先记录每行真实 `prompt_length`
+   - 再按 `generated_length = total_length - prompt_length` 计算真实生成长度
+   - 用 `output_start_idx : output_start_idx + generated_length` 回收 token
+   - 文件：`/data/LightRFT/lightrft/strategy/strategy_base.py`
+
+4. 删除中间用于止血的 `per-sample fallback`
+   - 恢复真正的 batched `hf` rollout
+   - 文件：`/data/LightRFT/lightrft/strategy/strategy_base.py`
+
+同时补了回归验证：
+
+- `/data/LightRFT/examples/math_prm/test_phase2_alignment.py`
+- `/data/LightRFT/examples/math_prm/check_hf_rollout.py`
+
+## 7. 修复后的验证结果
+
+### 7.1 最小 HF rollout 校验
+
+命令：
+
+```bash
+python examples/math_prm/check_hf_rollout.py \
+  --max-new-tokens 1024 \
+  --output-json /data/LightRFT/tmp/ursa_stage3/hf_rollout_check_1024_batch_fix_v2.json
+```
+
+结果文件：
+
+- `/data/LightRFT/tmp/ursa_stage3/hf_rollout_check_1024_batch_fix_v2.json`
+
+关键结论：
+
+- `success = true`
+- `strict_structure_success = true`
+- `all_match_direct_generate = true`
+- `all_below_length_cap = true`
+
+这说明：
+
+- LightRFT 本地 `hf` rollout 已重新回到 batched 路径
+- batched rollout 和 direct batched `actor.generate()` 已经逐 token 对齐
+- 之前的多模态批量截断问题已经不再存在
+
+### 7.2 真实 Phase 7 重新观测
+
+最新成功 run：
+
+- 日志：
+  - `/data/LightRFT/tmp/ursa_stage3/phase7_observation/phase7_observation_20260319_233851.log`
+- 摘要：
+  - `/data/LightRFT/tmp/ursa_stage3/phase7_observation/phase7_summary_20260319_233851.json`
+- 轨迹：
+  - `/data/LightRFT/results/lightrft-ursa8b-stage3-phase7-observation/lightrft-ursa8b-stage3-phase7-observation-ep1-kl0.003-lr2e-6-20260319_233851/trajectories/trajectories_step_1.json`
+
+关键结果：
+
+- `healthy_pass = true`
+- `format_success_ratio = 1.0`
+- `num_trajectories = 4`
+- `correctness_ratio = 0.25`
+- `drop_moment_ratio = 1.0`
+- `answer_extraction_failure_ratio = 0.0`
+- `prm_inference_failure_ratio = 0.0`
+- `mean_abs_delta = 0.815216064453125`
+
+训练日志里也已经重新出现：
+
+- `step 0 generate length`
+- `math_prm_postprocess`
+- PPO train 进度
+- trajectory 落盘
+- checkpoint 落盘
+
+并且这轮没有再发生：
+
+- 空跑 20 分钟后没有样本
+- `Step 1: Observe` 异常截断
+- `format_success_ratio = 0.75`
+
+## 8. 当前结论
+
+截至最新 `20260319_233851` 这轮观测，可以给出比较明确的结论：
+
+- `Phase 7` 之前的“格式稳定性未通过”，本质上是一个 rollout 集成 bug
+- 这个 bug 已经被修复
+- 当前 `Phase 7` 已重新回到 `healthy_pass = true`
+- 当前“超级无敌满”的长度问题也已经不再是主问题
+- 现在剩下的主要问题不再是格式稳定性，而是训练质量本身
+  - 例如 `correctness_ratio` 仍然只有 `0.25`
+- 同时还存在一个独立但真实的性能问题：
+  - 最新日志里的 `rollout engine generation time (global max) = 661.9063s`
+  - 整轮 `Episode [1/1]` 大约 `11分57秒`
+  - 说明当前本地 `hf` 多模态 rollout 已经“能跑完”，但还远不能算快
+
+## 9. 当前仍然存在的推理性能问题
+
+最新健康通过 run 的性能现状如下：
+
+- 日志：
+  - `/data/LightRFT/tmp/ursa_stage3/phase7_observation/phase7_observation_20260319_233851.log`
+- 关键信息：
+  - `Start VLM gather_and_generate ..., total prompts: 4` 出现在 `23:41:28`
+  - `step 0 generate length ...` 出现在 `23:52:30`
+  - 也就是 rollout 生成本身大约用了 `11` 分钟
+  - 日志里明确记录：`***Rollout engine generation time (global max): 661.9063s`
+
+这说明：
+
+- 当前真正阻塞 `Phase 7` 的已经不再是格式错误
+- 而是本地 `hf` 多模态 batched rollout 的吞吐仍然偏低
+
+这个问题和前面的格式 bug 不是一回事：
+
+- 格式 bug 已经修复
+- 但性能问题仍然存在
+
+也就是说，当前状态应该理解成：
+
+- 正确性层面：格式稳定性已经恢复
+- 性能层面：推理依然偏慢，只是还没有慢到再次阻塞 bounded run
+
+因此，后续工作的主线应该切换成：
+
+- 不再继续为“为什么会 `StepStep` / `7777...` / 截断”投入排查成本
+- 继续推进 reward、数据和训练质量本身的提升

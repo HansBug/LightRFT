@@ -1147,18 +1147,19 @@ Checklist：
 状态：
 
 - 已完成
-- 这里的“完成”指的是：Phase 7 所要求的 bounded full-data observation 已经真实跑通，观测数据已经收集完成
-- 这里的“完成”不等于“训练已经健康通过”
-- 当前结论是：训练链路、reward 链路、trajectory 保存和离线分析都已打通，但健康性判定仍未通过，当前明确问题是格式成功率偏低
+- 最新 bounded full-data observation 已重新健康通过
+- 训练链路、reward 链路、trajectory 保存和离线分析都已打通
+- 之前的格式稳定性问题已定位并修复，根因详见 `plan/PHASE7_FORMAT_STABILITY_ANALYSIS.md`
+- 当前仍有一个独立保留问题：本地 `hf` 多模态 rollout 速度明显偏慢，但已不再阻塞 bounded run 完成
 
 本轮最终观测配置：
 
 - 入口脚本：`examples/math_prm/run_phase7_observation.sh`
-- 真实运行时间戳：`20260319_205242`
-- 结果目录：`results/lightrft-ursa8b-stage3-phase7-observation/lightrft-ursa8b-stage3-phase7-observation-ep1-kl0.003-lr2e-6-20260319_205243`
-- 训练日志：`/data/LightRFT/tmp/ursa_stage3/phase7_observation/phase7_observation_20260319_205242.log`
-- 观测摘要：`/data/LightRFT/tmp/ursa_stage3/phase7_observation/phase7_summary_20260319_205242.json`
-- 轨迹文件：`results/lightrft-ursa8b-stage3-phase7-observation/lightrft-ursa8b-stage3-phase7-observation-ep1-kl0.003-lr2e-6-20260319_205243/trajectories/trajectories_step_1.json`
+- 真实运行时间戳：`20260319_233851`
+- 结果目录：`results/lightrft-ursa8b-stage3-phase7-observation/lightrft-ursa8b-stage3-phase7-observation-ep1-kl0.003-lr2e-6-20260319_233851`
+- 训练日志：`/data/LightRFT/tmp/ursa_stage3/phase7_observation/phase7_observation_20260319_233851.log`
+- 观测摘要：`/data/LightRFT/tmp/ursa_stage3/phase7_observation/phase7_summary_20260319_233851.json`
+- 轨迹文件：`results/lightrft-ursa8b-stage3-phase7-observation/lightrft-ursa8b-stage3-phase7-observation-ep1-kl0.003-lr2e-6-20260319_233851/trajectories/trajectories_step_1.json`
 - 数据：全量 `math_psgrpo` manifest
 - 资源形态：8 卡 bounded run
 - 关键缩小参数：
@@ -1173,6 +1174,16 @@ Checklist：
 
 为完成 Phase 7 额外补的例子层修复：
 
+- `lightrft/strategy/strategy_base.py`
+  - 修复本地 `hf` rollout 在左 padding 批次中按统一 prompt 长度切输出，导致短 prompt 前缀生成 token 被截断的问题
+  - 移除中间用于止血的 `per-sample fallback`，恢复 batched 多模态 rollout
+- `lightrft/utils/math_prm_output.py`
+  - 将 `math_psgrpo` 纳入 structured label
+  - 补齐短代数 final answer 的 stop 判定
+- `examples/math_prm/check_hf_rollout.py`
+  - 最小校验改成和真实 rollout 一致的 batched left-padding 直生基线
+- `examples/math_prm/test_phase2_alignment.py`
+  - 补齐左 padding 输出切片、`math_psgrpo` structured stop、短代数 answer stop 的回归测试
 - `examples/math_prm/run_phase7_observation.sh`
   - 修复 `timeout + wait` 在 `set -e` 下无法继续分析的问题
   - 默认缺失 `math_psgrpo` manifest 时自动生成
@@ -1186,35 +1197,31 @@ Checklist：
 
 最终观测结果：
 
+- 这轮最新 summary 已恢复为 `healthy_pass = true`
 - 训练侧 progress 指标已经真实出现，不再是 `Episode 0it`
-  - `pg` 共记录 `9` 个点，均值 `-0.00146`，范围 `[-0.0557, 0.1710]`
-  - `kl` 共记录 `9` 个点，均值 `0.00823`，最大 `0.0167`
-  - `rm` 共记录 `9` 个点，均值 `0.75689`，范围 `[0.6880, 0.8120]`
-- `Detailed Step Statistics` 摘要：
-  - `Total Reward = 0.2500 ± 0.5000`
-  - `Accuracy Reward = 0.2500 ± 0.5000`
-  - `Model Reward = 0.2505 ± 0.3257`
-  - `Drop Moment = 0.7500 ± 0.5000`
-  - `Step Score Min = 0.2505 ± 0.3257`
-  - `Step Score Mean = 0.6748 ± 0.1058`
-  - `Response Length = 963.0 ± 11.6`
-  - `Total Length = 1154.0 ± 0.0`
+  - `pg` 共记录 `9` 个点，均值 `0.0006778`，范围 `[-0.0522, 0.17]`
+  - `kl` 共记录 `9` 个点，均值 `0.0084111`，最大 `0.0181`
+  - `rm` 共记录 `9` 个点，均值 `0.4862222`，范围 `[0.438, 0.5]`
+- 真实 rollout 已完成并进入 train/save 阶段
+  - `step 0 generate length`: `min=45, max=455, mean=148.875`
+  - `rollout engine generation time (global max) = 661.9063s`
+  - `math_prm_postprocess` 仅裁掉 answer 行后的少量尾巴：`sanitized 4/4`, `mean_trim_tokens=1.0`
 - trajectory/summary 侧统计：
   - `num_trajectories = 4`
-  - `rollout_reward.mean = 0.25`
-  - `rollout_reward.variance = 0.1875`
-  - `psgrpo_final_reward.mean = 0.25`
+  - `rollout_reward.mean = 0.125`
+  - `rollout_reward.variance = 0.046875`
+  - `psgrpo_final_reward.mean = 0.125`
   - `correctness_ratio = 0.25`
-  - `drop_moment_ratio = 0.75`
+  - `drop_moment_ratio = 1.0`
   - `answer_extraction_failure_ratio = 0.0`
-  - `format_success_ratio = 0.75`
+  - `format_success_ratio = 1.0`
   - `prm_inference_failure_ratio = 0.0`
   - `image_read_failure_ratio = 0.0`（扫描前 `128` 条 manifest）
   - `multimodal_sample_count = 4`
   - 多模态 PRM 图像消融：
     - `checked_samples = 2`
     - `failed_samples = 0`
-    - `mean_abs_delta = 0.816131591796875`
+    - `mean_abs_delta = 0.815216064453125`
 
 Phase 7 结论：
 
@@ -1225,9 +1232,18 @@ Phase 7 结论：
   - 轨迹文件
   - 图像读取统计
   - 多模态 PRM 消融结果
-- 当前健康性仍不通过
-- 这次观测里最明确的问题不是训练崩溃，而是格式成功率只有 `0.75`
-- 也就是说，Phase 7 已经证明“当前 Stage 3 训练链路可观测、可分析、可保存”，但同时也证明“进入下一阶段前，仍需继续处理格式质量”
+- 当前健康性已通过，之前的格式稳定性问题已经收敛
+- Phase 7 现在证明的是：
+  - 当前 Stage 3 训练链路可观测、可分析、可保存
+  - 真实 8 卡 bounded run 可以在 20 分钟内完成
+  - 之前的格式异常主要是 rollout 集成 bug，而不是 URSA 本体问题
+- Phase 7 同时也保留了一个需要后续单独处理的问题：
+  - `hf` 多模态 rollout 仍然偏慢
+  - 当前虽然已经不再超时，但单轮 `rollout engine generation time` 仍在 `661.9063s` 量级
+- Phase 7 之后剩余的主问题已经切换成训练质量本身
+  - 例如当前 `correctness_ratio` 仍只有 `0.25`
+  - 以及 rollout 性能问题
+  - 这些都不再属于格式稳定性问题
 
 目标：
 

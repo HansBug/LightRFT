@@ -9,13 +9,16 @@ import re
 from typing import Optional
 
 
-MATH_PRM_STRUCTURED_LABELS = frozenset({"math_prm", "math_prm_combined"})
+MATH_PRM_STRUCTURED_LABELS = frozenset({"math_prm", "math_prm_combined", "math_psgrpo"})
 MATH_PRM_ANSWER_MARKER = "†Answer:"
 _MAX_MATH_PRM_ANSWER_WORDS = 24
 _MAX_MATH_PRM_ANSWER_CHARS = 160
 _EARLY_STOP_ANSWER_WORDS = 12
 _EARLY_STOP_ANSWER_CHARS = 80
 _BOOLEAN_ANSWERS = {"yes", "no", "true", "false"}
+_ALGEBRAIC_ANSWER_PATTERN = re.compile(
+    r"[A-Za-z][A-Za-z0-9_]*(?:\s*[,;]\s*[A-Za-z][A-Za-z0-9_]*)*\s*=\s*[-+A-Za-z0-9$\\][A-Za-z0-9\s,./%()=\-+*$\\^{}]*"
+)
 
 
 def is_math_prm_structured_label(label: Optional[str]) -> bool:
@@ -69,6 +72,8 @@ def should_stop_math_prm_response_text(response_text: str) -> bool:
     if lower_answer in _BOOLEAN_ANSWERS:
         return True
     if re.fullmatch(r"[-+]?[$]?\d[\d\s,./%()=-]*", answer_line):
+        return True
+    if _ALGEBRAIC_ANSWER_PATTERN.fullmatch(answer_line):
         return True
     if re.fullmatch(r"[A-E]", answer_line):
         return True

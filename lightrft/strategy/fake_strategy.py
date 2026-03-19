@@ -320,6 +320,8 @@ class FakeStrategy(StrategyBase):
         image_grid_thw=None,
         pixel_values_videos=None,
         video_grid_thw=None,
+        images_num=None,
+        videos_num=None,
     ):
         """
         Fake generation - returns empty results.

@@ -36,6 +36,7 @@ CURRENT_DIR = Path(__file__).resolve().parent
 if str(CURRENT_DIR) not in sys.path:
     sys.path.insert(0, str(CURRENT_DIR))
 
+from lightrft.datasets.utils import zero_pad_sequences
 from lightrft.strategy import StrategyBase
 from lightrft.strategy.fake_strategy import FakeStrategy
 from lightrft.utils.math_prm_output import should_stop_math_prm_response_text
@@ -101,6 +102,8 @@ class HFLocalRolloutCheckStrategy(FakeStrategy):
         image_grid_thw=None,
         pixel_values_videos=None,
         video_grid_thw=None,
+        images_num=None,
+        videos_num=None,
     ):
         return StrategyBase.engine_generate_local(
             self,
@@ -111,6 +114,8 @@ class HFLocalRolloutCheckStrategy(FakeStrategy):
             image_grid_thw=image_grid_thw,
             pixel_values_videos=pixel_values_videos,
             video_grid_thw=video_grid_thw,
+            images_num=images_num,
+            videos_num=videos_num,
         )
 
     def gather_and_generate(
@@ -237,12 +242,19 @@ def extract_prompt_token_ids(input_ids: torch.Tensor, attention_mask: torch.Tens
 def direct_generate_outputs(
     actor: UrsaActor,
     tokenizer,
+    prompt_token_ids: list[list[int]],
     model_inputs: dict[str, Any],
     sampling_params: dict[str, Any],
 ) -> list[list[int]]:
     eos_token_id = tokenizer.eos_token_id
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else eos_token_id
-    prompt_length = int(model_inputs["input_ids"].size(1))
+    prompt_tensors = [torch.tensor(ids, dtype=torch.long) for ids in prompt_token_ids]
+    padded_input_ids = zero_pad_sequences(prompt_tensors, side="left", value=pad_token_id).to(
+        model_inputs["input_ids"].device
+    )
+    attention_mask = padded_input_ids.ne(pad_token_id).long()
+    prompt_lengths = attention_mask.sum(dim=1).detach().cpu()
+    prompt_length = int(padded_input_ids.size(1))
     logits_processor = None
     if sampling_params.get("structured_answer_stop", False):
         logits_processor = LogitsProcessorList(
@@ -256,8 +268,8 @@ def direct_generate_outputs(
         )
 
     generate_kwargs = {
-        "input_ids": model_inputs["input_ids"],
-        "attention_mask": model_inputs["attention_mask"],
+        "input_ids": padded_input_ids,
+        "attention_mask": attention_mask,
         "pixel_values": model_inputs["pixel_values"],
         "image_grid_thw": model_inputs["image_grid_thw"],
         "logits_processor": logits_processor,
@@ -281,8 +293,9 @@ def direct_generate_outputs(
     direct_output_ids = []
     for row_idx in range(sequences.size(0)):
         total_length = int(attention_mask_out[row_idx].sum().item())
-        total_length = max(total_length, prompt_length)
-        direct_output_ids.append(sequences[row_idx, prompt_length:total_length].tolist())
+        generated_length = max(total_length - int(prompt_lengths[row_idx].item()), 0)
+        output_end_idx = prompt_length + generated_length
+        direct_output_ids.append(sequences[row_idx, prompt_length:output_end_idx].tolist())
     return direct_output_ids
 
 
@@ -356,6 +369,7 @@ def main() -> int:
         direct_output_ids = direct_generate_outputs(
             actor=actor,
             tokenizer=tokenizer,
+            prompt_token_ids=prompt_token_ids,
             model_inputs=model_inputs,
             sampling_params=sampling_params,
         )

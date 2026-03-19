@@ -784,6 +784,8 @@ class StrategyBase(ABC):
         image_grid_thw: Optional[torch.Tensor] = None,
         pixel_values_videos: Optional[torch.Tensor] = None,
         video_grid_thw: Optional[torch.Tensor] = None,
+        images_num: Optional[List[int]] = None,
+        videos_num: Optional[List[int]] = None,
     ) -> List[EasyDict]:
         """
         Perform text or multimodal generation using different inference engines based on the input mode.
@@ -911,6 +913,7 @@ class StrategyBase(ABC):
             device = torch.cuda.current_device()
             padded_input_ids = zero_pad_sequences(prompt_tensors, side="left", value=pad_token_id).to(device)
             attention_mask = padded_input_ids.ne(pad_token_id).long()
+            prompt_lengths = attention_mask.sum(dim=1).detach().cpu()
 
             def _prepare_tensor(tensor):
                 if tensor is None:
@@ -964,11 +967,12 @@ class StrategyBase(ABC):
             engine_outputs = []
             for idx in range(sequences.size(0)):
                 total_length = int(attention_mask_out[idx].sum().item())
-                total_length = max(total_length, output_start_idx)
+                generated_length = max(total_length - int(prompt_lengths[idx].item()), 0)
+                output_end_idx = output_start_idx + generated_length
                 engine_outputs.append(
                     EasyDict(
                         prompt_token_ids=normalized_prompt_ids[idx],
-                        output_token_ids=sequences[idx, output_start_idx:total_length].tolist(),
+                        output_token_ids=sequences[idx, output_start_idx:output_end_idx].tolist(),
                     )
                 )
             return engine_outputs
@@ -1124,6 +1128,8 @@ class StrategyBase(ABC):
                 image_grid_thw=all_images_grid_thw if is_multimodal else None,
                 pixel_values_videos=all_videos_pixel_values if is_multimodal else None,
                 video_grid_thw=all_videos_grid_thw if is_multimodal else None,
+                images_num=images_num if is_multimodal else None,
+                videos_num=videos_num if is_multimodal else None,
             )
             local_outputs = all_outputs
         else:

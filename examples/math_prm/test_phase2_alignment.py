@@ -20,7 +20,12 @@ from analyze_phase7_observation import build_issue_list, is_valid_stage3_format,
 from check_phase6_script_alignment import collect_phase6_alignment
 from train_colocate import resolve_reference_shard_size
 from lightrft.models.actor_vl import ActorVL
-from lightrft.utils.math_prm_output import sanitize_math_prm_response_text, should_stop_math_prm_response_text
+from lightrft.strategy.strategy_base import StrategyBase
+from lightrft.utils.math_prm_output import (
+    is_math_prm_structured_label,
+    sanitize_math_prm_response_text,
+    should_stop_math_prm_response_text,
+)
 
 
 REFERENCE_PROMPT = (
@@ -74,6 +79,11 @@ class FakeTokenizer:
     def encode(self, text, add_special_tokens=False):
         self.last_encoded = (text, add_special_tokens)
         return [42]
+
+
+class FakeHFGenerateTokenizer(FakeTokenizer):
+    def batch_decode(self, rows, skip_special_tokens=False):
+        return ["" for _ in rows]
 
 
 class FakeBatch(dict):
@@ -172,6 +182,44 @@ class FakeStrategy:
                 return False
 
         return _NoopContext()
+
+
+class FakeHFGenerateActor:
+    def __init__(self, generated_tokens=None):
+        self.calls = []
+        self.model = SimpleNamespace(config=SimpleNamespace(model_type="ursa"))
+        self.generated_tokens = generated_tokens
+
+    def generate(
+        self,
+        input_ids,
+        attention_mask=None,
+        pixel_values=None,
+        image_grid_thw=None,
+        pixel_values_videos=None,
+        video_grid_thw=None,
+        **kwargs,
+    ):
+        batch_size = int(input_ids.size(0))
+        self.calls.append(
+            {
+                "batch_size": batch_size,
+                "pixel_values_shape": None if pixel_values is None else tuple(pixel_values.shape),
+                "image_grid_shape": None if image_grid_thw is None else tuple(image_grid_thw.shape),
+            }
+        )
+        if self.generated_tokens is None:
+            generated = torch.full((batch_size, 1), 7, dtype=torch.long, device=input_ids.device)
+        else:
+            generated = torch.tensor(self.generated_tokens, dtype=torch.long, device=input_ids.device)
+        sequences = torch.cat([input_ids, generated], dim=1)
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=input_ids.device)
+        output_attention_mask = torch.cat(
+            [attention_mask.long(), torch.ones_like(generated, dtype=torch.long, device=input_ids.device)],
+            dim=1,
+        )
+        return sequences, output_attention_mask, None
 
 
 class FakeConfig:
@@ -482,7 +530,42 @@ class Phase2AlignmentTests(unittest.TestCase):
     def test_should_stop_math_prm_response_detects_short_final_answers(self):
         self.assertTrue(should_stop_math_prm_response_text("Step 1: Inspect.\n†Answer: yes"))
         self.assertTrue(should_stop_math_prm_response_text("Step 1: Compute.\n†Answer: 37"))
+        self.assertTrue(should_stop_math_prm_response_text("Step 1: Compute.\n†Answer: y = 41"))
         self.assertFalse(should_stop_math_prm_response_text("Step 1: Compute carefully."))
+
+    def test_math_psgrpo_is_treated_as_structured_label(self):
+        self.assertTrue(is_math_prm_structured_label("math_psgrpo"))
+        self.assertTrue(is_math_prm_structured_label("MATH_PSGRPO"))
+
+    def test_hf_ursa_multimodal_generation_preserves_outputs_for_left_padded_rows(self):
+        fake_actor = FakeHFGenerateActor(generated_tokens=[[91, 92, 93], [81, 82, 83]])
+        fake_strategy = SimpleNamespace(
+            inference_engine_type="hf",
+            inference_engine=fake_actor,
+            inference_tokenizer=FakeHFGenerateTokenizer(),
+            print=lambda *_args, **_kwargs: None,
+        )
+        fake_strategy.engine_generate_local = lambda **kwargs: StrategyBase.engine_generate_local(fake_strategy, **kwargs)
+
+        pixel_values = torch.randn(2, 3, 4, 4, dtype=torch.float32)
+        image_grid_thw = torch.tensor([[1, 2, 2], [1, 2, 2]], dtype=torch.long)
+
+        outputs = StrategyBase.engine_generate_local(
+            fake_strategy,
+            sampling_params={"max_new_tokens": 8, "do_sample": False, "structured_answer_stop": False},
+            prompt_token_ids=[[11, 12], [21, 22, 23, 24]],
+            pixel_values=pixel_values,
+            image_grid_thw=image_grid_thw,
+            images_num=[1, 1],
+        )
+
+        self.assertEqual(len(outputs), 2)
+        self.assertEqual([call["batch_size"] for call in fake_actor.calls], [2])
+        self.assertEqual([call["pixel_values_shape"] for call in fake_actor.calls], [(2, 3, 4, 4)])
+        self.assertEqual(outputs[0].prompt_token_ids, [11, 12])
+        self.assertEqual(outputs[1].prompt_token_ids, [21, 22, 23, 24])
+        self.assertEqual(outputs[0].output_token_ids, [91, 92, 93])
+        self.assertEqual(outputs[1].output_token_ids, [81, 82, 83])
 
     def test_math_prm_psgrpo_metrics_reward_mapping_matches_phase4(self):
         reward = _minimal_math_prm_instance()
