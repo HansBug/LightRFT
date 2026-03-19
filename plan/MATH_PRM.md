@@ -709,6 +709,76 @@ Checklist：
   - `pg` / `ret` / `model_reward_mean` 均有正常数值输出
   - 没有出现 OOM、死锁、图像载入失败或 reward 全零
 
+Phase 3 范畴内修复后的第二次 smoke（2026-03-19）：
+
+- 试跑日志：`/data/LightRFT/tmp/ursa_stage3/phase3_smoke/phase3_smoke_20260319_091453.log`
+- 本轮修复保持在 Phase 3 范畴内，没有提前引入 Phase 4 的 correctness / drop-moment / `math_prm_combined`
+- 本轮实际加入的修复包括：
+  - 更严格的 system prompt，明确要求首个 `†Answer:` 后立即停止
+  - 更保守的 smoke decode 参数：`temperature=0.8`、`top_p=0.95`、`top_k=50`、`repetition_penalty=1.05`、`no_repeat_ngram_size=4`
+  - 仅对 `math_prm` / `math_prm_combined` 生效的 rollout 后处理：对首个 `†Answer:` 后的异常拖尾做截断，并清理 `StepStep 1:` / 重复 answer marker / 重复字符尾巴
+- 这次 smoke 的直接结果是：
+  - 第一批和第二批都触发了 postprocess 截断
+  - 第一批 `sanitized 2/2 outputs`，平均裁掉 `927.5` token，最大裁掉 `953`
+  - 第二批 `sanitized 2/2 outputs`，平均裁掉 `904.0` token，最大裁掉 `934`
+  - 第一批样例已不再出现 `Camp Miniwauca` 长重复尾巴，输出恢复为干净的 `Step ... / †Answer: yes`
+  - 第二批样例已不再出现 `7777...` 和重复 `†Answer:`，输出恢复为单个 `†Answer:` 行
+  - 训练侧长度指标明显回落：
+    - 第一批 `rollout_response_length=88`
+    - 第二批 `rollout_response_length=117`
+    - 汇总统计 `Response Length = 117.0 ± 42.4`，`hit_max=0.0000`
+  - 训练侧 metrics 重新回到可读范围：
+    - 第一批 train `glen=104/124`，`tlen=264/287`，`kl=0 -> 0.0234`
+    - 第二批 train `glen=130/145`，`tlen=298/313`，`kl=0.0148 -> 0.0241`
+  - smoke 结束后相关进程已清理，8 张 GPU 已再次回收到 `1 MiB`
+
+但这次还不能简单记成“Phase 3 完全通过”，原因也需要明确保留：
+
+- raw generate 在进入 postprocess 前，第一批仍然出现 `step 0 generate length = 1024`
+- 第二批虽然格式已被修回正常，但样例解题内容本身仍然答错了，输出成了 `41` 而不是 reference `37`
+- 本轮 reward 也明显偏低：
+  - 第二批 `model_scores` 只有 `0.0192` 和 `0.0011`
+  - 汇总 `Total Reward = 0.0101 ± 0.0128`
+- 因此当前状态应记录为：
+  - **Phase 3 的“明显异常长尾 / 乱码 / 重复 answer marker”问题，已在本阶段内被显著压下**
+  - **Phase 3 的训练侧 metrics 已从“明显异常”恢复到“可继续观察与迭代”**
+  - **但 raw generation 仍有强烈超长倾向，且答案正确性/PRM 分数仍偏弱，因此还不应直接视为最终健康通过**
+
+对当前异常原因的判断（2026-03-19）：
+
+- 当前判断是：**Phase 3 异常生成的主因，不是因为 Phase 4 的 PS-GRPO / correctness / drop-moment 还没上**
+- 直接依据是：异常输出出现在第一次 PPO 更新之前
+  - 训练日志 `/data/LightRFT/tmp/ursa_stage3/phase3_smoke/phase3_smoke_20260319_005513.log` 中，先看到首批 rollout 的异常输出和 `step 0 generate length = 1024`
+  - 真正 actor 训练日志是在之后才开始打印
+  - 因此 `StepStep 1:`、`Camp Miniwauca`、`7777...` 这些异常，不可能是 Phase 4 reward 公式缺失“制造出来”的
+- 但也需要明确：
+  - **Phase 4 没上，确实会让这些异常更难被 reward 压下去**
+  - 它是“放大器”或“缺少额外约束”，不是当前第一次 rollout 就异常的首因
+
+当前更可能的原因排序：
+
+- 高优先级怀疑：rollout stopping / decoding / structured-format 对齐不够
+  - 首批 rollout 直接顶满 `generate_max_len=1024`
+  - 说明当前 prompt + decode 行为下，模型不会稳定在首个 `†Answer:` 后自然停下
+- 中高优先级怀疑：Phase 3 baseline reward 对“答完后继续拖尾”惩罚不够
+  - 本阶段 reward 明确定义为 `min(step_scores)`
+  - `math_prm` 路径下全局 `format_reward` 已不参与最终 reward
+  - 因此如果前面几步和首个答案行看起来还像样，后面即使继续胡写，仍可能拿到不低分数
+- 中优先级怀疑：full-data 样本分布与当前 system prompt 有一定错位
+  - 例如日志里首条样本是图像问答式的 `Is the landscape flat?`
+  - 但当前 system prompt 强约束成“math question + Step N + †Answer”
+  - 这种 schema / prompt 张力会放大异常 completion
+- 低优先级怀疑：单纯因为 Phase 4 算法还没实现
+  - 这不足以解释“第一次 PPO 更新前就已经出现异常长尾”
+
+因此，Phase 3 内的修复优先级需要固定为：
+
+- 先修 prompt / stopping / truncation / decode hygiene
+- 先确认首个 `†Answer:` 后能稳定停下，或至少能在训练侧被安全截断
+- 先确认 `response_length`、样例输出质量、`reward / kl / loss` 重新朝正常方向前进
+- **不要**把 Phase 4 的 correctness / drop-moment 提前混入，用 reward 升级去掩盖 Phase 3 的 rollout 结构问题
+- 如果 Phase 3 在这些修复后仍然异常，再进入 Phase 4 时再评估 reward 盲区对训练趋势的二次影响
+
 Phase 3 的试跑边界需要额外固定为：
 
 - 允许直接启动 `bash examples/math_prm/run_grpo_math_prm_ursa_8b.sh`
@@ -791,19 +861,23 @@ Checklist：
 - [x] 确认 reward model 能在训练环节稳定收到 `references`
 - [x] 确认 reward 输出能被 trainer 正常记录和消费
 - [x] 确认 reward 不会大面积恒为 0、恒为 1 或恒为同一常数
-- [ ] 确认生成结果满足 `Step N:` / `†Answer:` 的基本格式要求
+- [x] 确认生成结果满足 `Step N:` / `†Answer:` 的基本格式要求（经 Phase 3 stopping/truncation 修复后）
 - [x] 确认 rollout 后的权重同步回推理引擎链路正常
 - [x] Phase 3 的第一次训练验证固定采用 time-boxed smoke run，而不是无上限长跑
 - [x] 为 smoke run 设置明确 wall-clock 限制（默认 `20` 分钟）
 - [x] 在时间上限内至少观察到一轮足以判断链路健康度的训练日志
 - [x] smoke run 期间显式检查关键 metrics 的方向性，而不是只确认脚本未报错
-- [ ] 确认 `reward / kl / loss / response_length / 格式质量` 没有明显朝异常方向发展
+- [x] 确认 `reward / kl / loss / response_length / 格式质量` 没有明显朝异常方向发展（训练侧已恢复到可读区间）
 - [x] 如果脚本未崩但 metrics 明显异常，明确将该次 smoke run 记为失败而不是通过
 - [x] 确认至少能跑通 smoke test 训练
 - [x] smoke run 结束后清理全部相关进程，避免残留进程持续占用 GPU
 - [x] smoke run 结束后再次确认 GPU 已释放
 - [ ] 确认再进行一次更长时长的全量训练试跑
 - [x] 记录训练中的 OOM、死锁、图像载入异常、reward 异常分布等问题
+- [x] 记录“Phase 3 异常并非主要由 Phase 4 缺失导致”的根因判断
+- [x] 在 Phase 3 范畴内先完成 stopping / truncation / decode hygiene 修复
+- [x] 在修复后重新验证首个 `†Answer:` 后不会继续异常拖尾
+- [x] 在修复后重新验证 `response_length` 不再大面积顶满上限或长期停留在异常高位
 
 ### Phase 4：实现并对齐 PS-GRPO reward 语义
 

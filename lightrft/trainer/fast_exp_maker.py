@@ -22,6 +22,7 @@ Classes:
 """
 
 import os
+import re
 import time
 import pathlib
 import warnings
@@ -61,6 +62,59 @@ from .video_utils import normalize_videos, get_videos_num
 # ============================================================================
 # Data Structures
 # ============================================================================
+
+_MATH_PRM_STRUCTURED_LABELS = {"math_prm", "math_prm_combined"}
+_MATH_PRM_ANSWER_MARKER = "†Answer:"
+_MAX_MATH_PRM_ANSWER_WORDS = 24
+_MAX_MATH_PRM_ANSWER_CHARS = 160
+
+
+def _is_math_prm_structured_label(label: Optional[str]) -> bool:
+    return isinstance(label, str) and label.lower() in _MATH_PRM_STRUCTURED_LABELS
+
+
+def _find_math_prm_tail_cutoff(text: str) -> Optional[int]:
+    cut_positions = []
+    for pattern in (
+        r"(?<!^)(?:†Answer:|Step\s+\d+:)",
+        r"([0-9])\1{15,}",
+        r"([A-Za-z])\1{15,}",
+        r"(\b\S+\b)(?:\s+\1){3,}",
+        r"(\b\S+\s+\S+\b)(?:\s+\1){2,}",
+    ):
+        match = re.search(pattern, text)
+        if match:
+            cut_positions.append(match.start())
+    return min(cut_positions) if cut_positions else None
+
+
+def sanitize_math_prm_response_text(response_text: str) -> str:
+    if not response_text:
+        return response_text
+
+    normalized_text = re.sub(r"(?m)^StepStep\s+(\d+:)", r"Step \1", response_text)
+    marker_index = normalized_text.find(_MATH_PRM_ANSWER_MARKER)
+    if marker_index < 0:
+        return normalized_text
+
+    prefix = normalized_text[: marker_index + len(_MATH_PRM_ANSWER_MARKER)]
+    answer_tail = normalized_text[marker_index + len(_MATH_PRM_ANSWER_MARKER):].lstrip()
+    answer_line = answer_tail.splitlines()[0] if answer_tail else ""
+    answer_line = " ".join(answer_line.split())
+
+    cutoff = _find_math_prm_tail_cutoff(answer_line)
+    if cutoff is not None:
+        answer_line = answer_line[:cutoff]
+
+    answer_words = answer_line.split()
+    if len(answer_words) > _MAX_MATH_PRM_ANSWER_WORDS:
+        answer_line = " ".join(answer_words[:_MAX_MATH_PRM_ANSWER_WORDS])
+    if len(answer_line) > _MAX_MATH_PRM_ANSWER_CHARS:
+        truncated = answer_line[:_MAX_MATH_PRM_ANSWER_CHARS]
+        answer_line = truncated.rsplit(" ", 1)[0] or truncated
+
+    answer_line = answer_line.rstrip(" ,;:")
+    return prefix.rstrip() if not answer_line else f"{prefix} {answer_line}".rstrip()
 
 
 @dataclass
@@ -1137,6 +1191,7 @@ class FastExperienceMaker(NaiveExperienceMaker):
                 temperature=generate_kwargs.get("temperature", 1.0),
                 top_p=generate_kwargs.get("top_p", 1.0),
                 top_k=generate_kwargs.get("top_k", -1),
+                repetition_penalty=generate_kwargs.get("repetition_penalty", 1.0),
                 max_tokens=generate_kwargs.get("max_new_tokens", 1024),
                 min_tokens=generate_kwargs.get("min_new_tokens", 1),
                 skip_special_tokens=generate_kwargs.get("skip_special_tokens", False),
@@ -1154,7 +1209,7 @@ class FastExperienceMaker(NaiveExperienceMaker):
                 max_new_tokens=generate_kwargs.get("max_new_tokens", 1024),
                 presence_penalty=0.0,
                 frequency_penalty=0.0,
-                repetition_penalty=1.0,
+                repetition_penalty=generate_kwargs.get("repetition_penalty", 1.0),
                 skip_special_tokens=generate_kwargs.get("skip_special_tokens", False),
                 spaces_between_special_tokens=True,
                 ignore_eos=os.environ.get("IGNORE_EOS", "0") == "1",
@@ -1167,6 +1222,8 @@ class FastExperienceMaker(NaiveExperienceMaker):
                 max_new_tokens=generate_kwargs.get("max_new_tokens", 1024),
                 min_new_tokens=generate_kwargs.get("min_new_tokens", 1),
                 do_sample=generate_kwargs.get("do_sample", True),
+                repetition_penalty=generate_kwargs.get("repetition_penalty", 1.0),
+                no_repeat_ngram_size=generate_kwargs.get("no_repeat_ngram_size", 0),
                 skip_special_tokens=generate_kwargs.get("skip_special_tokens", False),
                 ignore_eos=os.environ.get("IGNORE_EOS", "0") == "1",
             )
@@ -1252,6 +1309,8 @@ class FastExperienceMaker(NaiveExperienceMaker):
             else:
                 raise
 
+        all_outputs = self._sanitize_structured_math_prm_outputs(all_outputs, all_labels)
+
         # ========== Process Outputs into Samples ==========
         samples_list = []
         image_patch_idx = 0
@@ -1323,6 +1382,49 @@ class FastExperienceMaker(NaiveExperienceMaker):
         self.strategy.report_memory("after rollout engine generation")
 
         return samples_list
+
+    def _sanitize_structured_math_prm_outputs(self, outputs: List, labels: Optional[List]) -> List:
+        if not outputs or not labels:
+            return outputs
+        if not hasattr(self.tokenizer, "decode") or not hasattr(self.tokenizer, "encode"):
+            return outputs
+
+        sanitized = 0
+        trimmed_token_counts = []
+
+        for idx, label in enumerate(labels[: len(outputs)]):
+            if not _is_math_prm_structured_label(label):
+                continue
+
+            original_ids = list(outputs[idx].output_token_ids)
+            if not original_ids:
+                continue
+
+            original_text = self.tokenizer.decode(original_ids, skip_special_tokens=False)
+            cleaned_text = sanitize_math_prm_response_text(original_text)
+            if cleaned_text == original_text:
+                continue
+
+            cleaned_ids = self.tokenizer.encode(cleaned_text, add_special_tokens=False)
+            if not cleaned_ids:
+                continue
+            if cleaned_ids == original_ids:
+                continue
+
+            outputs[idx].output_token_ids = cleaned_ids
+            sanitized += 1
+            trimmed_token_counts.append(len(original_ids) - len(cleaned_ids))
+
+        if sanitized:
+            mean_trim = float(np.mean(trimmed_token_counts))
+            max_trim = int(max(trimmed_token_counts))
+            self.strategy.print(
+                "[math_prm_postprocess] sanitized "
+                f"{sanitized}/{len(outputs)} outputs after first answer line; "
+                f"mean_trim_tokens={mean_trim:.1f}, max_trim_tokens={max_trim}"
+            )
+
+        return outputs
 
     def get_advantages_and_returns(
         self,

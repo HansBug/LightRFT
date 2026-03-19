@@ -255,7 +255,10 @@ class ActorVL(nn.Module):
             "eos_token_id": kwargs.get("eos_token_id"),
             "pad_token_id": kwargs.get("pad_token_id"),
             "min_new_tokens": kwargs.get("min_new_tokens", 1),
+            "repetition_penalty": kwargs.get("repetition_penalty", 1.0),
         }
+        if kwargs.get("no_repeat_ngram_size", 0) > 0:
+            generate_args["no_repeat_ngram_size"] = kwargs["no_repeat_ngram_size"]
 
         if kwargs.get("max_new_tokens", None):
             generate_args["max_new_tokens"] = kwargs.get("max_new_tokens")

@@ -78,6 +78,11 @@ LR="${LR:-1e-6}"                      # Actor learning rate.
 MAX_LENGTH="${MAX_LENGTH:-4096}"      # Max total sequence length (prompt + generation).
 PROMPT_MAX_LEN="${PROMPT_MAX_LEN:-1024}"   # Max prompt length.
 GENERATE_MAX_LEN="${GENERATE_MAX_LEN:-3072}" # Max generation length (leave room for CoT).
+TOP_P="${TOP_P:-1.0}"
+TOP_K="${TOP_K:--1}"
+TEMPERATURE="${TEMPERATURE:-1.0}"
+REPETITION_PENALTY="${REPETITION_PENALTY:-1.0}"
+NO_REPEAT_NGRAM_SIZE="${NO_REPEAT_NGRAM_SIZE:-0}"
 MAX_SAMPLES="${MAX_SAMPLES:-1000000}"
 SAVE_STEPS="${SAVE_STEPS:-20}"
 MAX_CKPT_NUM="${MAX_CKPT_NUM:-2}"
@@ -114,6 +119,7 @@ fi
 EVAL_SPLIT="${EVAL_SPLIT:-}"
 USE_URSA_ENGINE_WRAPPER="${USE_URSA_ENGINE_WRAPPER:-1}"
 URSA_ENGINE_CHECKPOINT_DIR="${URSA_ENGINE_CHECKPOINT_DIR:-/data/LightRFT/tmp/ursa_stage3/URSA-8B-engine-ready}"
+SYSTEM_PROMPT="${SYSTEM_PROMPT:-A conversation between the User and Assistant. The User asks a question that may require mathematical or visual reasoning, and the Assistant solves it step by step. Each step MUST begin with \"Step N:\" (e.g. \"Step 1:\", \"Step 2:\") on its own line. After all steps, output exactly one final answer line prefixed with \"†Answer:\" (e.g. \"†Answer: 42\"). Stop immediately after the \"†Answer:\" line and do not output any extra text, repeated answer markers, or additional steps.}"
 
 
 ################################################################################
@@ -204,6 +210,11 @@ torchrun \
     --n_samples_per_prompt $N_SAMPLES \
     --prompt_max_len $PROMPT_MAX_LEN \
     --generate_max_len $GENERATE_MAX_LEN \
+    --temperature $TEMPERATURE \
+    --top_p $TOP_P \
+    --top_k $TOP_K \
+    --repetition_penalty $REPETITION_PENALTY \
+    --no_repeat_ngram_size $NO_REPEAT_NGRAM_SIZE \
     --zero_stage 3 \
     --bf16 \
     --actor_learning_rate $LR \
@@ -225,7 +236,7 @@ torchrun \
     --engine_mem_util 0.6 \
     --engine_tp_size $ENGINE_TP \
     --enable_engine_sleep \
-    --system_prompt 'A conversation between the User and Assistant. The User asks a math question, and the Assistant solves it step by step. Each step MUST begin with "Step N:" (e.g. "Step 1:", "Step 2:") on its own line. After all steps, the final answer MUST be on its own line prefixed with "†Answer:" (e.g. "†Answer: 42"). Example format: Step 1: ... Step 2: ... †Answer: .... This structured format is required for the process reward model to score each step.' \
+    --system_prompt "${SYSTEM_PROMPT}" \
     --l2 1.0e-2 \
     --freeze_prefix \
     --adam_offload \

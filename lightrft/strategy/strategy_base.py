@@ -911,6 +911,8 @@ class StrategyBase(ABC):
                     do_sample=do_sample,
                     max_new_tokens=sampling_params.get("max_new_tokens", 1024),
                     min_new_tokens=sampling_params.get("min_new_tokens", 1),
+                    repetition_penalty=sampling_params.get("repetition_penalty", 1.0),
+                    no_repeat_ngram_size=sampling_params.get("no_repeat_ngram_size", 0),
                     eos_token_id=eos_token_id,
                     pad_token_id=pad_token_id,
                 )

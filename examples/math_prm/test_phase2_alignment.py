@@ -17,6 +17,7 @@ if str(MATH_PRM_DIR) not in sys.path:
 from reward_models import MathPRMReward
 from reward_models_utils import RewardModelType, load_reward_models, mix_rewards
 from lightrft.models.actor_vl import ActorVL
+from lightrft.trainer.fast_exp_maker import sanitize_math_prm_response_text
 
 
 REFERENCE_PROMPT = (
@@ -356,6 +357,32 @@ class Phase2AlignmentTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["format_reward"].item(), 1.0, places=6)
         self.assertAlmostEqual(metrics["model_reward"].item(), 0.25, places=6)
         self.assertAlmostEqual(reward.item(), 1.25, places=6)
+
+    def test_sanitize_math_prm_response_truncates_after_first_answer_line(self):
+        response = (
+            "StepStep 1: Observe the image.\n"
+            "Step 2: Decide whether the terrain is flat.\n"
+            "†Answer: It is a flat landscape Camp Miniwauca Camp Miniwauca Camp Miniwauca Camp Miniwauca\n"
+            "Step 1: repeated garbage"
+        )
+
+        self.assertEqual(
+            sanitize_math_prm_response_text(response),
+            "Step 1: Observe the image.\nStep 2: Decide whether the terrain is flat.\n†Answer: It is a flat landscape",
+        )
+
+    def test_sanitize_math_prm_response_removes_second_answer_tail(self):
+        response = (
+            "Step 1: Compute y = 5x + 7.\n"
+            "Step 2: Substitute x = 6.\n"
+            "†Answer: 37\n"
+            "7777777777777777777777 †Answer: 3777777777777777"
+        )
+
+        self.assertEqual(
+            sanitize_math_prm_response_text(response),
+            "Step 1: Compute y = 5x + 7.\nStep 2: Substitute x = 6.\n†Answer: 37",
+        )
 
     def test_actor_vl_casts_multimodal_tensors_to_model_dtype(self):
         fake_model = FakeVisionLanguageModel()
