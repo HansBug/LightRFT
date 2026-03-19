@@ -16,6 +16,7 @@ if str(MATH_PRM_DIR) not in sys.path:
 
 from reward_models import MathPRMReward
 from reward_models_utils import RewardModelType, load_reward_models, mix_rewards, reward_fn
+from check_phase6_script_alignment import collect_phase6_alignment
 from lightrft.models.actor_vl import ActorVL
 from lightrft.utils.math_prm_output import sanitize_math_prm_response_text, should_stop_math_prm_response_text
 
@@ -621,6 +622,32 @@ class Phase2AlignmentTests(unittest.TestCase):
 
         self.assertEqual(fake_model.forward_pixel_dtype, torch.bfloat16)
         self.assertEqual(fake_model.generate_pixel_dtype, torch.bfloat16)
+
+    def test_phase6_launcher_alignment_report_passes(self):
+        report = collect_phase6_alignment()
+        failed = {
+            name: payload
+            for name, payload in report["checks"].items()
+            if not payload["passed"]
+        }
+
+        self.assertTrue(report["success"], msg=json.dumps(failed, ensure_ascii=False, indent=2, sort_keys=True))
+        self.assertEqual(failed, {})
+
+    def test_phase6_launcher_alignment_records_batch_implementation(self):
+        report = collect_phase6_alignment()
+        batch_check = report["checks"]["table14_train_batch_implementation"]
+
+        self.assertTrue(batch_check["passed"])
+        self.assertEqual(
+            batch_check["actual"],
+            {
+                "world_size": 8,
+                "micro_train_batch_size": 4,
+                "train_batch_size": 512,
+                "gradient_accumulation": 16,
+            },
+        )
 
 
 if __name__ == "__main__":

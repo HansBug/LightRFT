@@ -1039,6 +1039,12 @@ Checklist：
 
 ### Phase 6：训练脚本与运行参数阶段性对齐
 
+状态：
+
+- 已完成
+- 当前 `examples/math_prm/run_grpo_math_prm_ursa_8b.sh` 已从“能跑的样例脚本”推进到“当前机器上的 Stage 3 复现入口脚本”
+- 这一阶段仍然先使用全量转换 manifest，不提前混入 Phase 8 的筛选数据逻辑
+
 目标：
 
 - 把当前脚本从“可运行样例”推进到“Stage 3 复现脚本”
@@ -1048,27 +1054,93 @@ Checklist：
 
 - 这一阶段仍然允许先用全量数据
 - 但脚本的命名、label、RM 路径、关键开关需要先对齐
+- 这一阶段不改 `lightrft/` 核心训练语义，只收敛 example 入口、默认参数、注释和校验
+
+本轮实际落地：
+
+- `examples/math_prm/run_grpo_math_prm_ursa_8b.sh`
+  - 默认 reward label 保持为 `math_psgrpo`
+  - 默认 actor / RM 路径显式固定为当前机器上的：
+    - `/home/ubuntu/URSA-MATH/checkpoints/URSA-8B`
+    - `/home/ubuntu/URSA-MATH/checkpoints/URSA-RM-8B`
+  - 默认数据入口显式固定为转换后的 LightRFT manifest：
+    - `/data/LightRFT/tmp/ursa_stage3/mmathcot_stage3_math_psgrpo.jsonl`
+  - 去掉了与 URSA PRM 直连需求冲突的 `--rm_use_engine`
+  - 新增 Phase 6 preflight：
+    - 检查 actor / RM / dataset / Dockerfile 路径是否存在
+    - 检查 dataset label 是否与目标 reward path 一致
+    - 显式打印当前 Table 14 对齐快照
+    - 显式打印当前 `train_batch_size=512` 的实现方式
+  - 注释和使用说明里明确写明：
+    - 当前所有运行和排障都以 `/data/LightRFT/Dockerfile` 为冻结环境基线
+    - Dockerfile 中已安装的 pip 包版本与安装顺序不要擅自改动
+    - 如需先做资源 smoke，可复用：
+      - `/home/ubuntu/URSA-MATH/examples/run_dataset_loading_example.py`
+      - `/home/ubuntu/URSA-MATH/examples/validate_dataset_entrypoints.py`
+    - Phase 3 baseline smoke 应走 `examples/math_prm/run_phase3_smoke.sh`
+  - Table 14 对齐后的默认超参现在是：
+    - `n_samples_per_prompt = 8`
+    - `temperature = 1.0`
+    - `init_kl_coef = 0.003`
+    - `actor_learning_rate = 2e-6`
+    - `prompt_max_len = 6048`
+    - `generate_max_len = 3072`
+    - `train_batch_size = 512`
+  - 当前 8 卡机器上的 global batch 512 实现方式明确记录为：
+    - `micro_train_batch_size = 4`
+    - `world_size = 8`
+    - `accumulated_gradient = 16`
+    - 即 `4 x 8 x 16 = 512`
+- `examples/math_prm/train_colocate.py`
+  - example 默认值已同步到当前 Stage 3 入口语义：
+    - `engine_type = hf`
+    - `prompt_max_len = 6048`
+    - `generate_max_len = 3072`
+    - `train_batch_size = 512`
+    - `n_samples_per_prompt = 8`
+    - `actor_learning_rate = 2e-6`
+    - `init_kl_coef = 0.003`
+    - `images_key = "images"`
+  - 文档说明里也明确了：`rm_use_engine` 虽然仍是通用 flag，但 `math_prm/math_psgrpo` 的 URSA PRM 仍然走 HF 直连
+- `examples/math_prm/check_phase6_script_alignment.py`
+  - 新增最小对齐校验脚本
+  - 直接检查 launcher 默认值、注释、关键 flag、Docker baseline 说明和 batch 实现方式是否满足 Phase 6 约束
+
+当前与最终论文复现仍保留的差异：
+
+- 数据仍然是全量转换 manifest，不是 Phase 8 才会产出的筛选后约 `15.3K` RL 子集
+- rollout backend 当前仍默认使用本地 `hf`，不是外部 `vllm/sglang`
+- `rollout_batch_size` 仍保持工程上更稳的 `128`，没有在这一阶段强行和最终长跑策略一起改动
+
+验证：
+
+- `python examples/math_prm/check_phase6_script_alignment.py`
+  - 通过
+- `python -m unittest -q examples.math_prm.test_phase2_alignment`
+  - 通过
+- `bash -n examples/math_prm/run_grpo_math_prm_ursa_8b.sh`
+  - 通过
 
 Checklist：
 
-- [ ] 将脚本中的 reward label 明确为目标 Stage 3 路径
-- [ ] 将脚本中的模型占位路径替换为本机实际路径：`/home/ubuntu/URSA-MATH/checkpoints/URSA-8B` 与 `/home/ubuntu/URSA-MATH/checkpoints/URSA-RM-8B`
-- [ ] 将 `PATH_TO_YOUR_MATH_DATASET` 明确为转换后的 LightRFT manifest，而不是 raw `train.jsonl`
-- [ ] 明确当前所有运行和排障都以 `/data/LightRFT/Dockerfile` 为冻结环境基线
-- [ ] 明确 Dockerfile 中已安装的 pip 包版本与安装顺序后续不允许擅自改动，保持保本一致性
-- [ ] 去掉与 PRM 直连需求冲突的 `rm_use_engine` 用法
-- [ ] 明确 `freeze_prefix`、多模态开关、图像字段名等必要参数
-- [ ] 明确如需先做资源 smoke test，可直接复用 `/home/ubuntu/URSA-MATH/examples/run_dataset_loading_example.py` 与 `validate_dataset_entrypoints.py`
-- [ ] 梳理当前脚本参数与论文 Table 14 的差异
-- [ ] 优先对齐 `n_samples_per_prompt = 8`
-- [ ] 优先对齐 `temperature = 1.0`
-- [ ] 优先对齐 `init_kl_coef = 0.003`
-- [ ] 优先对齐 `actor_learning_rate = 2e-6`
-- [ ] 优先对齐 `prompt_max_len = 6048`
-- [ ] 优先对齐 `generate_max_len = 3072`
-- [ ] 评估当前硬件条件下是否能直接对齐 `train_batch_size = 512`
-- [ ] 如果不能直接对齐，明确记录采用的等效梯度累积方案
-- [ ] 确认脚本注释中明确写明“当前阶段先用全量数据，不做筛选”
+- [x] 将脚本中的 reward label 明确为目标 Stage 3 路径
+- [x] 将脚本中的模型占位路径替换为本机实际路径：`/home/ubuntu/URSA-MATH/checkpoints/URSA-8B` 与 `/home/ubuntu/URSA-MATH/checkpoints/URSA-RM-8B`
+- [x] 将 `PATH_TO_YOUR_MATH_DATASET` 明确为转换后的 LightRFT manifest，而不是 raw `train.jsonl`
+- [x] 明确当前所有运行和排障都以 `/data/LightRFT/Dockerfile` 为冻结环境基线
+- [x] 明确 Dockerfile 中已安装的 pip 包版本与安装顺序后续不允许擅自改动，保持保本一致性
+- [x] 去掉与 PRM 直连需求冲突的 `rm_use_engine` 用法
+- [x] 明确 `freeze_prefix`、多模态开关、图像字段名等必要参数
+- [x] 明确如需先做资源 smoke test，可直接复用 `/home/ubuntu/URSA-MATH/examples/run_dataset_loading_example.py` 与 `validate_dataset_entrypoints.py`
+- [x] 梳理当前脚本参数与论文 Table 14 的差异
+- [x] 优先对齐 `n_samples_per_prompt = 8`
+- [x] 优先对齐 `temperature = 1.0`
+- [x] 优先对齐 `init_kl_coef = 0.003`
+- [x] 优先对齐 `actor_learning_rate = 2e-6`
+- [x] 优先对齐 `prompt_max_len = 6048`
+- [x] 优先对齐 `generate_max_len = 3072`
+- [x] 评估当前硬件条件下是否能直接对齐 `train_batch_size = 512`
+- [x] 记录当前 global batch `512` 的实现方式：`4 x 8 x 16 = 512`
+- [x] 确认脚本注释中明确写明“当前阶段先用全量数据，不做筛选”
 
 ### Phase 7：全量数据训练观测与稳定性验证
 
@@ -1208,7 +1280,7 @@ Checklist：
 - [x] 说明当前是否为“全量数据试跑版”
 - [ ] 说明当前是否为“筛选数据复现版”
 - [x] 参数与 reward 路径不冲突
-- [ ] Phase 3 试跑时明确使用 `math_prm`
+- [x] Phase 3 试跑时明确使用 `math_prm`
 - [x] Phase 4+ 正式 Stage 3 训练时明确切换到 `math_psgrpo`
 
 ### `lightrft/trainer/fast_exp_maker.py`

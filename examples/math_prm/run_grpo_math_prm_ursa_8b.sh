@@ -3,13 +3,19 @@
 # LightRFT GRPO Training Script – URSA-8B with URSA-8B-RM (Math PRM)
 #
 # Trains URSA-8B (multimodal math VLM) with URSA-8B-RM as the Process Reward Model.
-# This is the stage3 training from URSA-MATH, migrated to LightRFT framework.
+# This is the URSA-MATH Stage 3 launcher migrated into LightRFT and aligned to the
+# current Phase 6 "Stage 3 reproduction script" checkpoint.
 #
 # Key features:
 #   - Actor: URSA-8B (hybrid vision tower + Qwen2.5-Math-Instruct)
 #   - Reward: URSA-8B-RM (process reward model for step-level scoring)
 #   - Algorithm: Phase 4 GRPO with PS-GRPO reward via math_psgrpo label
 #   - Dataset: converted MMathCoT-1M Stage 3 manifest
+#   - Runtime baseline: /data/LightRFT/Dockerfile
+#
+# Important baseline rule:
+#   Keep the pip packages and installation order from /data/LightRFT/Dockerfile
+#   unchanged unless you are explicitly doing environment migration work.
 #
 # Step-scoring protocol (see MathPRMReward in reward_models.py):
 #   1. The actor generates a chain-of-thought response.
@@ -51,9 +57,10 @@ PATH_TO_URSA_RM="${PATH_TO_URSA_RM:-/home/ubuntu/URSA-MATH/checkpoints/URSA-RM-8
 # See examples/data_preprocess/ for preprocessing helpers.
 PATH_TO_YOUR_MATH_DATASET="${PATH_TO_YOUR_MATH_DATASET:-/data/LightRFT/tmp/ursa_stage3/mmathcot_stage3_math_psgrpo.jsonl}"
 EXPECTED_REWARD_LABEL="${EXPECTED_REWARD_LABEL:-math_psgrpo}"
+DOCKER_BASELINE="${DOCKER_BASELINE:-/data/LightRFT/Dockerfile}"
 
 # --- Experiment metadata ---
-EXPERIMENT_NAME="${EXPERIMENT_NAME:-lightrft-ursa8b-math-prm-grpo-phase4}"
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-lightrft-ursa8b-stage3-psgrpo}"
 
 # --- W&B ---
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
@@ -71,15 +78,14 @@ WARMUP="${WARMUP:-0.03}"              # LR warmup ratio.
 
 # --- Batch sizes ---
 RBS="${RBS:-128}"                     # Rollout batch size (total across all GPUs).
-TBS="${TBS:-128}"                     # Training batch size.
+TBS="${TBS:-512}"                     # Global train batch size (Table 14 target).
 MICRO_TRAIN_BATCH_SIZE="${MICRO_TRAIN_BATCH_SIZE:-4}"
 MICRO_ROLLOUT_BATCH_SIZE="${MICRO_ROLLOUT_BATCH_SIZE:-8}"
 
 # --- Optimisation ---
-KL="${KL:-0.01}"                      # KL divergence coefficient (higher than text-only).
-LR="${LR:-1e-6}"                      # Actor learning rate.
-MAX_LENGTH="${MAX_LENGTH:-4096}"      # Max total sequence length (prompt + generation).
-PROMPT_MAX_LEN="${PROMPT_MAX_LEN:-1024}"   # Max prompt length.
+KL="${KL:-0.003}"                     # Table 14 target KL coefficient.
+LR="${LR:-2e-6}"                      # Table 14 target actor learning rate.
+PROMPT_MAX_LEN="${PROMPT_MAX_LEN:-6048}"   # Table 14 target prompt length.
 GENERATE_MAX_LEN="${GENERATE_MAX_LEN:-3072}" # Max generation length (leave room for CoT).
 TOP_P="${TOP_P:-1.0}"
 TOP_K="${TOP_K:--1}"
@@ -140,6 +146,22 @@ export TORCH_NCCL_AVOID_RECORD_STREAMS=1
 export NCCL_DEBUG="WARN"
 export IGNORE_EOS=0
 export WANDB_MODE="${WANDB_MODE:-offline}"   # Set to "online" for real-time W&B logging.
+export PATH_TO_YOUR_BASE_MODEL
+export PATH_TO_URSA_RM
+export PATH_TO_YOUR_MATH_DATASET
+export EXPECTED_REWARD_LABEL
+export DOCKER_BASELINE
+export N_SAMPLES
+export TBS
+export MICRO_TRAIN_BATCH_SIZE
+export MLP_WORKER_NUM
+export MLP_WORKER_GPU
+export TEMPERATURE
+export KL
+export LR
+export PROMPT_MAX_LEN
+export GENERATE_MAX_LEN
+export ENGINE_TYPE
 
 python - <<'PY'
 import json
@@ -148,8 +170,24 @@ from pathlib import Path
 
 dataset_path = Path(os.environ["PATH_TO_YOUR_MATH_DATASET"])
 expected_label = os.environ["EXPECTED_REWARD_LABEL"]
+base_model_path = Path(os.environ["PATH_TO_YOUR_BASE_MODEL"])
+rm_model_path = Path(os.environ["PATH_TO_URSA_RM"])
+docker_baseline = Path(os.environ["DOCKER_BASELINE"])
 if not dataset_path.exists():
     raise SystemExit(f"[run_grpo_math_prm_ursa_8b.sh] Dataset not found: {dataset_path}")
+for path_label, path_value in (
+    ("base model", base_model_path),
+    ("reward model", rm_model_path),
+):
+    if str(path_value).startswith("/") and not path_value.exists():
+        raise SystemExit(
+            f"[run_grpo_math_prm_ursa_8b.sh] {path_label} path not found: {path_value}"
+        )
+if not docker_baseline.exists():
+    raise SystemExit(
+        "[run_grpo_math_prm_ursa_8b.sh] Frozen runtime baseline not found: "
+        f"{docker_baseline}"
+    )
 
 seen = set()
 with dataset_path.open("r", encoding="utf-8") as f:
@@ -172,6 +210,49 @@ if seen != {expected_label}:
 print(
     "[run_grpo_math_prm_ursa_8b.sh] Dataset label check passed: "
     f"{expected_label!r} from {dataset_path}"
+)
+
+world_size = int(os.environ["MLP_WORKER_NUM"]) * int(os.environ["MLP_WORKER_GPU"])
+micro_train_batch_size = int(os.environ["MICRO_TRAIN_BATCH_SIZE"])
+train_batch_size = int(os.environ["TBS"])
+if train_batch_size % (micro_train_batch_size * world_size) != 0:
+    raise SystemExit(
+        "[run_grpo_math_prm_ursa_8b.sh] train batch size is not divisible by "
+        "(micro_train_batch_size * world_size): "
+        f"{train_batch_size} % ({micro_train_batch_size} * {world_size}) != 0"
+    )
+grad_accum = train_batch_size // (micro_train_batch_size * world_size)
+
+table14_targets = {
+    "n_samples_per_prompt": ("N_SAMPLES", "8"),
+    "temperature": ("TEMPERATURE", "1.0"),
+    "init_kl_coef": ("KL", "0.003"),
+    "actor_learning_rate": ("LR", "2e-6"),
+    "prompt_max_len": ("PROMPT_MAX_LEN", "6048"),
+    "generate_max_len": ("GENERATE_MAX_LEN", "3072"),
+    "train_batch_size": ("TBS", "512"),
+}
+alignment_summary = []
+for name, (env_key, expected_value) in table14_targets.items():
+    current_value = os.environ[env_key]
+    status = "aligned" if current_value == expected_value else f"override({current_value})"
+    alignment_summary.append(f"{name}={status}")
+
+print(
+    "[run_grpo_math_prm_ursa_8b.sh] Phase 6 preflight: "
+    f"engine_type={os.environ['ENGINE_TYPE']}, "
+    f"world_size={world_size}, "
+    f"train_batch_size={train_batch_size}, "
+    f"micro_train_batch_size={micro_train_batch_size}, "
+    f"gradient_accumulation={grad_accum}"
+)
+print(
+    "[run_grpo_math_prm_ursa_8b.sh] Table 14 alignment snapshot: "
+    + ", ".join(alignment_summary)
+)
+print(
+    "[run_grpo_math_prm_ursa_8b.sh] Frozen runtime baseline: "
+    f"{docker_baseline}"
 )
 PY
 
@@ -268,7 +349,6 @@ torchrun \
     --gradient_checkpointing \
     --save_steps ${SAVE_STEPS} \
     --max_ckpt_num ${MAX_CKPT_NUM} \
-    --rm_use_engine \
     --engine_type "${ENGINE_TYPE}" \
     --engine_mem_util 0.6 \
     --engine_tp_size $ENGINE_TP \
@@ -315,9 +395,26 @@ torchrun \
 #   - Phase 3 baseline remains available only when you intentionally provide   #
 #     a math_prm-labeled manifest and override EXPECTED_REWARD_LABEL          #
 #   - You can override all key hyperparameters and paths via environment vars #
+#   - Phase 6 default alignment to Table 14 now includes:                      #
+#       n_samples_per_prompt=8, temperature=1.0, init_kl_coef=0.003,          #
+#       actor_learning_rate=2e-6, prompt_max_len=6048, generate_max_len=3072, #
+#       train_batch_size=512                                                   #
+#   - On the current 8-GPU machine this batch is realized as:                  #
+#       micro_train_batch_size=4 x world_size=8 x grad_accum=16 = 512         #
+#   - Current deliberate differences vs final paper reproduction:              #
+#       full-data manifest first, filtered ~15.3K subset postponed to Phase 8 #
+#       rollout uses the local HF engine under the frozen Docker baseline      #
 #                                                                              #
 # Step 5: Run training                                                         #
 #   bash examples/math_prm/run_grpo_math_prm_ursa_8b.sh                       #
+#   - For the Phase 3 baseline smoke path, use                                #
+#       bash examples/math_prm/run_phase3_smoke.sh                             #
+#     which exports a math_prm-labeled manifest and time-boxed settings.      #
+#   - For data/resource smoke checks before RL training, you can reuse:        #
+#       python /home/ubuntu/URSA-MATH/examples/run_dataset_loading_example.py  #
+#       python /home/ubuntu/URSA-MATH/examples/validate_dataset_entrypoints.py \
+#           --policy-model /home/ubuntu/URSA-MATH/checkpoints/URSA-8B          \
+#           --prm-model /home/ubuntu/URSA-MATH/checkpoints/URSA-RM-8B          #
 #                                                                              #
 # Key differences from URSA-MATH original implementation:                      #
 #   - Uses LightRFT's FSDP/DeepSpeed training infrastructure                  #

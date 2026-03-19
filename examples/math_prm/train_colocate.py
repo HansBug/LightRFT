@@ -185,7 +185,8 @@ def train(args):
         - meta_init: Initialize models on meta device to save CPU RAM
         - freeze_prefix: Freeze vision encoder during training
         - fsdp: Use FSDP instead of DeepSpeed
-        - rm_use_engine: Use SGLang engine for reward models
+        - rm_use_engine: Generic flag retained for other reward types, but
+          URSA math_prm/math_psgrpo PRM paths still load via HF directly
     """
     # configure strategy
     strategy = get_strategy(args)
@@ -557,7 +558,7 @@ def train(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--engine_type", type=str, default="vllm", help="Choose inference engine type: vllm, sglang, hf")
+    parser.add_argument("--engine_type", type=str, default="hf", help="Choose inference engine type: vllm, sglang, hf")
     parser.add_argument("--text_only", action="store_true", default=False)
 
     # Checkpoint
@@ -586,8 +587,8 @@ if __name__ == "__main__":
     parser.add_argument("--rollout_batch_size", type=int, default=512)
     parser.add_argument("--micro_rollout_batch_size", type=int, default=8)
     parser.add_argument("--max_epochs", type=int, default=1)
-    parser.add_argument("--prompt_max_len", type=int, default=1024, help="Max tokens for each prompt")
-    parser.add_argument("--generate_max_len", type=int, default=1024, help="Max tokens to generate in PPO")
+    parser.add_argument("--prompt_max_len", type=int, default=6048, help="Max tokens for each prompt")
+    parser.add_argument("--generate_max_len", type=int, default=3072, help="Max tokens to generate in PPO")
     parser.add_argument("--max_len", type=int, default=None, help="deprecated max_len")
     parser.add_argument("--max_samples", type=int, default=1000000)
     parser.add_argument("--max_norm", type=float, default=1.0, help="Gradient clipping")
@@ -603,7 +604,7 @@ if __name__ == "__main__":
     parser.add_argument("--lambd", type=float, default=0.95, help="PPO GAE lambd")
     parser.add_argument("--gamma", type=float, default=1, help="PPO GAE gamma")
     parser.add_argument("--micro_train_batch_size", type=int, default=4, help="batch size per GPU")
-    parser.add_argument("--train_batch_size", type=int, default=128, help="Global training batch size")
+    parser.add_argument("--train_batch_size", type=int, default=512, help="Global training batch size")
     parser.add_argument("--normalize_reward_for_critic", action="store_true", default=False, help="Enable Reward Normalization in critic model")
     parser.add_argument("--top_p", type=float, default=1.0)
     parser.add_argument("--top_k", type=int, default=-1)
@@ -613,14 +614,14 @@ if __name__ == "__main__":
     parser.add_argument("--freeze_prefix", action="store_true", default=False, help="Freeze the prefix part (e.g. vision encoder) of the actor model")
     parser.add_argument("--freezing_actor_steps", type=int, default=-1, help="Used for critic initialization")
     parser.add_argument(
-        "--n_samples_per_prompt", type=int, default=1, help="number of responses for each prompt in generation"
+        "--n_samples_per_prompt", type=int, default=8, help="number of responses for each prompt in generation"
     )
     parser.add_argument("--save_value_network", action="store_true", default=False, help="Save critic model")
-    parser.add_argument("--actor_learning_rate", type=float, default=1e-6)
+    parser.add_argument("--actor_learning_rate", type=float, default=2e-6)
     parser.add_argument("--critic_learning_rate", type=float, default=9e-6)
     parser.add_argument("--lr_warmup_ratio", type=float, default=0.03)
     parser.add_argument("--kl_target", type=float, default=None)
-    parser.add_argument("--init_kl_coef", type=float, default=0.01, help="KL penalty in PPO")
+    parser.add_argument("--init_kl_coef", type=float, default=0.003, help="KL penalty in PPO")
     parser.add_argument(
         "--kl_estimator",
         type=str,
@@ -710,7 +711,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--pretrain_split", type=str, default="train")
     parser.add_argument("--input_key", type=str, default="input", help="JSON dataset key")
-    parser.add_argument("--images_key", type=str, default="image", help="JSON dataser key for images")
+    parser.add_argument("--images_key", type=str, default="images", help="JSON dataset key for images")
     parser.add_argument("--reference_key", type=str, default="reference", help="JSON dataset key for reference answers")
     parser.add_argument("--label_key", type=str, default="label", help="JSON dataset key")
     parser.add_argument("--input_template", type=str, default=None)
