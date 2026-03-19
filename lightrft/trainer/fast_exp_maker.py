@@ -281,6 +281,7 @@ class MultimodalDataProcessor:
                 "add_special_tokens": False,
                 "max_length": self.prompt_max_len,
                 "truncation": True,
+                "return_tensors": "pt",
             }
             if flat_images:
                 processor_kwargs["images"] = flat_images
@@ -295,6 +296,15 @@ class MultimodalDataProcessor:
 
             all_images_grid_thw_multimodal = inputs_multimodal.get("image_grid_thw", None)
             all_videos_grid_thw_multimodal = inputs_multimodal.get("video_grid_thw", None)
+
+            # Some VLM processors (for example URSA) return batched image tensors directly
+            # and do not expose Qwen2-VL style grid metadata. In that case we synthesize a
+            # minimal per-image grid so the existing sample/replay slicing logic can still
+            # split one tensor slice per image while the model simply ignores the grid input.
+            if flat_images and all_images_grid_thw_multimodal is None:
+                all_images_grid_thw_multimodal = torch.ones((len(flat_images), 3), dtype=torch.long)
+            if flat_videos and all_videos_grid_thw_multimodal is None:
+                all_videos_grid_thw_multimodal = torch.ones((len(flat_videos), 3), dtype=torch.long)
 
         # ===== Stage 4: Merge back in original order =====
         total_samples = L * N
@@ -1149,6 +1159,17 @@ class FastExperienceMaker(NaiveExperienceMaker):
                 spaces_between_special_tokens=True,
                 ignore_eos=os.environ.get("IGNORE_EOS", "0") == "1",
             )
+        elif config.engine_type == "hf":
+            sampling_params = dict(
+                temperature=generate_kwargs.get("temperature", 1.0),
+                top_p=generate_kwargs.get("top_p", 1.0),
+                top_k=generate_kwargs.get("top_k", -1),
+                max_new_tokens=generate_kwargs.get("max_new_tokens", 1024),
+                min_new_tokens=generate_kwargs.get("min_new_tokens", 1),
+                do_sample=generate_kwargs.get("do_sample", True),
+                skip_special_tokens=generate_kwargs.get("skip_special_tokens", False),
+                ignore_eos=os.environ.get("IGNORE_EOS", "0") == "1",
+            )
         else:
             raise ValueError(f"Unsupported engine type: {config.engine_type}")
 
@@ -1219,6 +1240,10 @@ class FastExperienceMaker(NaiveExperienceMaker):
                     all_videos=all_videos if is_multimodal else None,
                     images_num=all_images_num if is_multimodal else None,
                     videos_num=all_videos_num if is_multimodal else None,
+                    all_images_pixel_values=all_images_pixel_values if is_multimodal else None,
+                    all_videos_pixel_values=all_videos_pixel_values if is_multimodal else None,
+                    all_images_grid_thw=all_images_grid_thw if is_multimodal else None,
+                    all_videos_grid_thw=all_videos_grid_thw if is_multimodal else None,
                 )
         except ValueError as e:
             if "prompt" in str(e) and "too long" in str(e):
@@ -1721,9 +1746,16 @@ class FastExperienceMaker(NaiveExperienceMaker):
             return
 
         config = self.strategy.unwrap_model(self.actor.model).config
-        image_token_id = config.image_token_id
+        image_token_id = getattr(config, "image_token_id", getattr(config, "image_token_index", None))
+        if image_token_id is None:
+            return
         num_tokens = (sequences == image_token_id).sum()
-        num_patches = sample.pixel_values.shape[0] // 4
+        # Qwen2-VL style processors usually flatten patches (dim < 4), while some
+        # VLMs such as URSA keep one image tensor per item (dim == 4). Handle both.
+        if sample.pixel_values.dim() >= 4:
+            num_patches = sample.pixel_values.shape[0]
+        else:
+            num_patches = sample.pixel_values.shape[0] // 4
 
         if num_tokens != num_patches:
             self.strategy.print(

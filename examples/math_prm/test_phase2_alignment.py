@@ -15,7 +15,8 @@ if str(MATH_PRM_DIR) not in sys.path:
     sys.path.insert(0, str(MATH_PRM_DIR))
 
 from reward_models import MathPRMReward
-from reward_models_utils import RewardModelType, load_reward_models
+from reward_models_utils import RewardModelType, load_reward_models, mix_rewards
+from lightrft.models.actor_vl import ActorVL
 
 
 REFERENCE_PROMPT = (
@@ -152,6 +153,64 @@ class FakeModelForProcessor:
         self.config = FakeConfig()
 
 
+class FakeVisionLanguageModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.anchor = torch.nn.Parameter(torch.zeros(1, dtype=torch.bfloat16))
+        self.config = SimpleNamespace(model_type="fake-vl")
+        self.forward_pixel_dtype = None
+        self.generate_pixel_dtype = None
+
+    def forward(
+        self,
+        input_ids,
+        attention_mask=None,
+        position_ids=None,
+        pixel_values=None,
+        image_grid_thw=None,
+        pixel_values_videos=None,
+        video_grid_thw=None,
+    ):
+        self.forward_pixel_dtype = None if pixel_values is None else pixel_values.dtype
+        batch_size, seq_len = input_ids.shape
+        return {"logits": torch.zeros((batch_size, seq_len, 8), dtype=torch.float32, device=input_ids.device)}
+
+    def prepare_inputs_for_generation(
+        self,
+        input_ids,
+        past_key_values=None,
+        attention_mask=None,
+        pixel_values=None,
+        image_grid_thw=None,
+        pixel_values_videos=None,
+        video_grid_thw=None,
+        **kwargs,
+    ):
+        return {
+            "input_ids": input_ids,
+            "past_key_values": past_key_values,
+            "attention_mask": attention_mask,
+            "pixel_values": pixel_values,
+            "image_grid_thw": image_grid_thw,
+            "pixel_values_videos": pixel_values_videos,
+            "video_grid_thw": video_grid_thw,
+        }
+
+    def generate(
+        self,
+        input_ids,
+        attention_mask=None,
+        pixel_values=None,
+        image_grid_thw=None,
+        pixel_values_videos=None,
+        video_grid_thw=None,
+        **kwargs,
+    ):
+        self.generate_pixel_dtype = None if pixel_values is None else pixel_values.dtype
+        suffix = torch.full((input_ids.size(0), 1), 7, dtype=input_ids.dtype, device=input_ids.device)
+        return torch.cat([input_ids, suffix], dim=1)
+
+
 def _minimal_math_prm_instance():
     reward = MathPRMReward.__new__(MathPRMReward)
     torch.nn.Module.__init__(reward)
@@ -268,6 +327,62 @@ class Phase2AlignmentTests(unittest.TestCase):
         self.assertEqual(tokenizer.padding_side, "left")
         self.assertEqual(tokenizer.pad_token, tokenizer.eos_token)
         self.assertEqual(model.config.pad_token_id, tokenizer.eos_token_id)
+
+    def test_mix_rewards_keeps_phase3_math_prm_as_pure_model_reward(self):
+        labels = ["math_prm"]
+        model_scores = torch.tensor([[0.75]], dtype=torch.float32)
+        label_map = {"math_prm": 0}
+        solutions = ["Step 1: Count the triangles.\n†Answer: 4"]
+        refs = ["4"]
+
+        with mock.patch("torch.distributed.get_rank", return_value=0):
+            reward, metrics = mix_rewards(labels, model_scores, label_map, solutions, refs)
+
+        self.assertAlmostEqual(reward.item(), 0.75, places=6)
+        self.assertAlmostEqual(metrics["model_reward"].item(), 0.75, places=6)
+        self.assertAlmostEqual(metrics["rule_reward"].item(), 0.0, places=6)
+        self.assertAlmostEqual(metrics["format_reward"].item(), 1.0, places=6)
+
+    def test_mix_rewards_still_applies_global_format_reward_for_non_math_labels(self):
+        labels = ["general"]
+        model_scores = torch.tensor([[0.25]], dtype=torch.float32)
+        label_map = {"general": 0}
+        solutions = ["<think>reason</think>\nfinal answer"]
+        refs = [""]
+
+        with mock.patch("torch.distributed.get_rank", return_value=0):
+            reward, metrics = mix_rewards(labels, model_scores, label_map, solutions, refs)
+
+        self.assertAlmostEqual(metrics["format_reward"].item(), 1.0, places=6)
+        self.assertAlmostEqual(metrics["model_reward"].item(), 0.25, places=6)
+        self.assertAlmostEqual(reward.item(), 1.25, places=6)
+
+    def test_actor_vl_casts_multimodal_tensors_to_model_dtype(self):
+        fake_model = FakeVisionLanguageModel()
+        actor = ActorVL(pretrain_or_model=fake_model)
+
+        sequences = torch.tensor([[1, 2, 3]], dtype=torch.long)
+        attention_mask = torch.ones_like(sequences)
+        pixel_values = torch.randn(1, 3, 16, 16, dtype=torch.float32)
+
+        actor(
+            sequences=sequences,
+            num_actions=None,
+            attention_mask=attention_mask,
+            pixel_values=pixel_values,
+            return_output=True,
+        )
+        actor.generate(
+            input_ids=sequences,
+            attention_mask=attention_mask,
+            pixel_values=pixel_values,
+            eos_token_id=9,
+            pad_token_id=0,
+            max_new_tokens=1,
+        )
+
+        self.assertEqual(fake_model.forward_pixel_dtype, torch.bfloat16)
+        self.assertEqual(fake_model.generate_pixel_dtype, torch.bfloat16)
 
 
 if __name__ == "__main__":

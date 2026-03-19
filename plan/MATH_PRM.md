@@ -683,6 +683,32 @@ Checklist：
 - 这一阶段允许 reward 先保持“基础版 math_prm”
 - 目标是先验证主链路可运行、日志可观测、显存和吞吐行为可接受
 
+当前结果（2026-03-19）：
+
+- 已完成一次严格按边界执行的 `time-boxed smoke run`：
+  - 启动脚本：`/data/LightRFT/examples/math_prm/run_phase3_smoke.sh`
+  - 训练日志：`/data/LightRFT/tmp/ursa_stage3/phase3_smoke/phase3_smoke_20260319_005513.log`
+- 当前结论不是“脚本未崩即通过”，而是：
+  - **主链路已打通**
+  - **本次 smoke run 健康性判定为失败**
+- 已确认打通的链路包括：
+  - dataloader 正常起批
+  - 多模态 actor rollout 正常返回
+  - reward model 在训练环节拿到 `prompt_and_output / raw_images / references`
+  - trainer 正常打印 `reward / kl / pg / response_length / total_length`
+  - smoke run 结束后相关进程已清理，8 张 GPU 已回收为 `1 MiB`
+- 这次判定为失败的直接原因包括：
+  - 第一批 rollout 的 `step 0 generate length` 仍然是 `min=max=mean=1024`
+  - 第一批样例生成出现 `StepStep 1:` 和大段 `"Camp Miniwauca"` 异常重复拖尾
+  - 第二批样例虽然中前段推理和答案 `37` 看起来正确，但后续继续出现大段 `7777...` 拖尾，并重复输出 `†Answer: 37...`
+  - `response_length` 持续在 `943 ~ 946` token，高于“健康 smoke”应有的紧凑回答形态
+  - `format_reward=1.0` 不能掩盖生成文本已经明显跑偏，因此不能将本次试跑记为通过
+- 这次 smoke run 中可确认的正向信号包括：
+  - reward 不再是全 `0` / 全 `1` / 单一常数
+  - `kl` 为有限值，且从 `0 -> 0.0251 -> 0.0585`
+  - `pg` / `ret` / `model_reward_mean` 均有正常数值输出
+  - 没有出现 OOM、死锁、图像载入失败或 reward 全零
+
 Phase 3 的试跑边界需要额外固定为：
 
 - 允许直接启动 `bash examples/math_prm/run_grpo_math_prm_ursa_8b.sh`
@@ -751,33 +777,33 @@ Phase 3 的 reward 方案需要明确固定为：
 
 Checklist：
 
-- [ ] 明确 Phase 3 baseline reward 使用 `math_prm`
-- [ ] 明确 `math_prm` 在本阶段的语义就是 `min(step_scores)`
-- [ ] 明确 Phase 3 不引入 `drop-moment`
-- [ ] 明确 Phase 3 不引入 outcome correctness
-- [ ] 明确 Phase 3 不引入 `math_prm_combined`
-- [ ] 明确 Phase 3 不引入 rule reward
-- [ ] 修正 `mix_rewards()` 中与 URSA 格式不对齐的全局 format reward，使其不参与 `math_prm` 路径
-- [ ] 确认全量数据可被 dataloader 稳定消费
-- [ ] 确认 actor rollout 能在多模态样本上正常生成
-- [ ] 确认 reward model 能在训练环节稳定收到 `prompt_and_output`
-- [ ] 确认 reward model 能在训练环节稳定收到 `raw_images`
-- [ ] 确认 reward model 能在训练环节稳定收到 `references`
-- [ ] 确认 reward 输出能被 trainer 正常记录和消费
-- [ ] 确认 reward 不会大面积恒为 0、恒为 1 或恒为同一常数
+- [x] 明确 Phase 3 baseline reward 使用 `math_prm`
+- [x] 明确 `math_prm` 在本阶段的语义就是 `min(step_scores)`
+- [x] 明确 Phase 3 不引入 `drop-moment`
+- [x] 明确 Phase 3 不引入 outcome correctness
+- [x] 明确 Phase 3 不引入 `math_prm_combined`
+- [x] 明确 Phase 3 不引入 rule reward
+- [x] 修正 `mix_rewards()` 中与 URSA 格式不对齐的全局 format reward，使其不参与 `math_prm` 路径
+- [x] 确认全量数据可被 dataloader 稳定消费
+- [x] 确认 actor rollout 能在多模态样本上正常生成
+- [x] 确认 reward model 能在训练环节稳定收到 `prompt_and_output`
+- [x] 确认 reward model 能在训练环节稳定收到 `raw_images`
+- [x] 确认 reward model 能在训练环节稳定收到 `references`
+- [x] 确认 reward 输出能被 trainer 正常记录和消费
+- [x] 确认 reward 不会大面积恒为 0、恒为 1 或恒为同一常数
 - [ ] 确认生成结果满足 `Step N:` / `†Answer:` 的基本格式要求
-- [ ] 确认 rollout 后的权重同步回推理引擎链路正常
-- [ ] Phase 3 的第一次训练验证固定采用 time-boxed smoke run，而不是无上限长跑
-- [ ] 为 smoke run 设置明确 wall-clock 限制（默认 `20` 分钟）
-- [ ] 在时间上限内至少观察到一轮足以判断链路健康度的训练日志
-- [ ] smoke run 期间显式检查关键 metrics 的方向性，而不是只确认脚本未报错
+- [x] 确认 rollout 后的权重同步回推理引擎链路正常
+- [x] Phase 3 的第一次训练验证固定采用 time-boxed smoke run，而不是无上限长跑
+- [x] 为 smoke run 设置明确 wall-clock 限制（默认 `20` 分钟）
+- [x] 在时间上限内至少观察到一轮足以判断链路健康度的训练日志
+- [x] smoke run 期间显式检查关键 metrics 的方向性，而不是只确认脚本未报错
 - [ ] 确认 `reward / kl / loss / response_length / 格式质量` 没有明显朝异常方向发展
-- [ ] 如果脚本未崩但 metrics 明显异常，明确将该次 smoke run 记为失败而不是通过
-- [ ] 确认至少能跑通 smoke test 训练
-- [ ] smoke run 结束后清理全部相关进程，避免残留进程持续占用 GPU
-- [ ] smoke run 结束后再次确认 GPU 已释放
+- [x] 如果脚本未崩但 metrics 明显异常，明确将该次 smoke run 记为失败而不是通过
+- [x] 确认至少能跑通 smoke test 训练
+- [x] smoke run 结束后清理全部相关进程，避免残留进程持续占用 GPU
+- [x] smoke run 结束后再次确认 GPU 已释放
 - [ ] 确认再进行一次更长时长的全量训练试跑
-- [ ] 记录训练中的 OOM、死锁、图像载入异常、reward 异常分布等问题
+- [x] 记录训练中的 OOM、死锁、图像载入异常、reward 异常分布等问题
 
 ### Phase 4：实现并对齐 PS-GRPO reward 语义
 

@@ -766,6 +766,22 @@ def format_reward_fn(sol: str) -> float:
     return 1.0 if re.match(r".*<think>.+?</think>\s*\S+", sol, re.DOTALL) else 0.0
 
 
+def math_prm_format_reward_fn(sol: str) -> float:
+    """
+    Diagnostic-only format check for URSA Stage 3 rollouts.
+
+    This metric does NOT contribute to the Phase 3 reward. It is logged so we can
+    tell whether the actor is preserving the required ``Step N:`` / ``†Answer:``
+    structure during smoke training.
+    """
+    if not isinstance(sol, str):
+        return 0.0
+
+    step_matches = re.findall(r"(?m)^Step\s+\d+\s*:\s*\S", sol)
+    answer_match = re.search(r"(?m)^†Answer:\s*\S", sol)
+    return 1.0 if step_matches and answer_match else 0.0
+
+
 def rule_reward_fn(sol: str, gt: str) -> float:
     """
     Extract content after </think> and verify against ground truth using mathruler.
@@ -981,13 +997,20 @@ RECIPE: Dict[str, List[Tuple[str, Optional[str], float]]] = {
     "geo3k_rule":      [("geo3k_rule", None,  1.0)],
     # GSM8K dataset: pure rule-based reward (no reward model needed)
     "gsm8k_rule":      [("gsm8k_rule", None,  1.0)],
-    # Math PRM: step-level reward from URSA-8B-RM (or compatible PRM)
-    # The PRM alone is usually sufficient; add a light format bonus if desired.
+    # Math PRM Phase 3 baseline: reward is exactly min(step_scores) from URSA-RM.
+    # Format is tracked separately as a diagnostic metric but MUST NOT affect reward.
     "math_prm":        [("model", "math_prm", 1.0)],
-    # Math PRM + rule-based accuracy (format reward comes for free from mix_rewards)
+    # Math PRM + rule-based accuracy ablation. Still no implicit global format bonus.
     "math_prm_combined": [("model", "math_prm", 1.0), ("rule", None, 0.5)],
     # Ablation: rule-only baseline to compare against PRM
     "math_rule":       [("rule", None, 1.0)],
+}
+
+
+NO_GLOBAL_FORMAT_REWARD_LABELS = {
+    "math_prm",
+    "math_prm_combined",
+    "math_rule",
 }
 
 
@@ -1002,7 +1025,7 @@ def mix_rewards(
     Mix rewards from multiple sources according to recipe configuration.
 
     This function combines:
-        1. Format reward (always applied)
+        1. Optional format reward (label-dependent)
         2. Model-based rewards (from neural reward models)
         3. Rule-based rewards (from heuristic functions)
 
@@ -1026,9 +1049,13 @@ def mix_rewards(
         - Never raises IndexError, always returns valid reward
 
     Note:
-        Format reward is always computed first, then rewards from recipe are added
+        The global ``format_reward_fn`` is intentionally DISABLED for the math PRM
+        labels used in URSA Stage 3 Phase 3. For those labels we still log a
+        math-specific format metric via ``math_prm_format_reward_fn`` for diagnosis,
+        but the final reward remains pure ``min(step_scores)`` (plus any explicit
+        rule component for non-baseline ablations like ``math_prm_combined``).
     """
-    if torch.distributed.get_rank() == 0:
+    if torch.distributed.is_available() and torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
         print(f"labels:{labels}, model_scores:{model_scores.tolist()}")
     device = model_scores.device
     n_model, B = model_scores.shape[0], len(labels)
@@ -1073,10 +1100,14 @@ def mix_rewards(
         sol = solution_strs[i]
         gt  = refs[i] if i < len(refs) else ""
 
-        # 1) format reward (always present)
-        r = format_reward_fn(sol)
-        # Track separately
-        metrics_dict['format_reward'][i] = r
+        # 1) format metric / optional format reward
+        format_metric = (
+            math_prm_format_reward_fn(sol)
+            if lab in NO_GLOBAL_FORMAT_REWARD_LABELS
+            else format_reward_fn(sol)
+        )
+        metrics_dict['format_reward'][i] = format_metric
+        r = 0.0 if lab in NO_GLOBAL_FORMAT_REWARD_LABELS else format_metric
 
         # 2) accumulate according to recipe
         recipe = RECIPE.get(lab)

@@ -22,12 +22,33 @@ from transformers import (
     AutoModel,
     AutoModelForCausalLM,
 )
+from transformers.generation import GenerationMixin
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache
 from transformers.modeling_outputs import ModelOutput
 from .configuration_ursa import UrsaConfig, AlignerConfig, VisionConfig
 from .clip_encoder import CLIPVisionTower, HybridVisionTower
 from .projector import MlpProjector
+
+
+def _get_module_float_dtype(module) -> Optional[torch.dtype]:
+    module_dtype = getattr(module, "dtype", None)
+    if isinstance(module_dtype, torch.dtype):
+        return module_dtype
+    for parameter in module.parameters():
+        if torch.is_floating_point(parameter):
+            return parameter.dtype
+    return None
+
+
+def _cast_pixel_values_to_vision_dtype(pixel_values: Optional[torch.Tensor], vision_model):
+    if pixel_values is None or not torch.is_tensor(pixel_values) or not torch.is_floating_point(pixel_values):
+        return pixel_values
+    vision_dtype = _get_module_float_dtype(vision_model)
+    if vision_dtype is None or pixel_values.dtype == vision_dtype:
+        return pixel_values
+    return pixel_values.to(dtype=vision_dtype)
+
 
 @dataclass
 class UrsaCausalLMOutputWithPast(ModelOutput):
@@ -78,7 +99,7 @@ class UrsaPreTrainedModel(PreTrainedModel):
         return getattr(language_model, "_supports_sdpa", False)
     
 
-class UrsaForConditionalGeneration(UrsaPreTrainedModel):
+class UrsaForConditionalGeneration(UrsaPreTrainedModel, GenerationMixin):
     def __init__(self, config: UrsaConfig):
         super().__init__(config)
         # print(config)
@@ -239,6 +260,7 @@ class UrsaForConditionalGeneration(UrsaPreTrainedModel):
 
             # 2. Merge text and images
             if pixel_values is not None and input_ids.shape[1] != 1:
+                pixel_values = _cast_pixel_values_to_vision_dtype(pixel_values, self.vision_model)
                 image_outputs = self.vision_model(pixel_values)
                 # this is not memory efficient at all (output_hidden_states=True) will save all the hidden stated.
                 # selected_image_feature = image_outputs.hidden_states[vision_feature_layer]
@@ -338,7 +360,12 @@ class UrsaForConditionalGeneration(UrsaPreTrainedModel):
         if past_key_values is not None:
             if isinstance(past_key_values, Cache):
                 cache_length = past_key_values.get_seq_length()
-                past_length = past_key_values.seen_tokens
+                if hasattr(past_key_values, "seen_tokens"):
+                    past_length = past_key_values.seen_tokens
+                elif hasattr(past_key_values, "_seen_tokens"):
+                    past_length = past_key_values._seen_tokens
+                else:
+                    past_length = cache_length
             else:
                 cache_length = past_length = past_key_values[0][0].shape[2]
 
@@ -552,6 +579,7 @@ class UrsaForTokenClassification(UrsaPreTrainedModel):
 
             # 2. Merge text and images
             if pixel_values is not None and input_ids.shape[1] != 1:
+                pixel_values = _cast_pixel_values_to_vision_dtype(pixel_values, self.vision_model)
                 image_outputs = self.vision_model(pixel_values)
                 # this is not memory efficient at all (output_hidden_states=True) will save all the hidden stated.
                 # selected_image_feature = image_outputs.hidden_states[vision_feature_layer]
@@ -658,7 +686,12 @@ class UrsaForTokenClassification(UrsaPreTrainedModel):
         if past_key_values is not None:
             if isinstance(past_key_values, Cache):
                 cache_length = past_key_values.get_seq_length()
-                past_length = past_key_values.seen_tokens
+                if hasattr(past_key_values, "seen_tokens"):
+                    past_length = past_key_values.seen_tokens
+                elif hasattr(past_key_values, "_seen_tokens"):
+                    past_length = past_key_values._seen_tokens
+                else:
+                    past_length = cache_length
             else:
                 cache_length = past_length = past_key_values[0][0].shape[2]
 

@@ -29,20 +29,42 @@ class UrsaProcessor(ProcessorMixin):
     def __init__(self, image_processor=None, tokenizer=None, chat_template=None, **kwargs):
         super().__init__(image_processor, tokenizer, chat_template=chat_template, **kwargs)
 
+    @staticmethod
+    def _normalize_image_placeholders(text):
+        if isinstance(text, str):
+            return text.replace("<image>", "<|image|>")
+        if isinstance(text, list):
+            return [UrsaProcessor._normalize_image_placeholders(item) for item in text]
+        if isinstance(text, tuple):
+            return tuple(UrsaProcessor._normalize_image_placeholders(item) for item in text)
+        return text
+
     def __call__(
         self,
         text: Union[TextInput, PreTokenizedInput, List[TextInput], List[PreTokenizedInput]] = None,
         images: ImageInput = None,
+        videos: ImageInput = None,
         padding: Union[bool, str, PaddingStrategy] = False,
         truncation: Union[bool, str, TruncationStrategy] = None,
         max_length=None,
+        add_special_tokens: bool = True,
         return_tensors: Optional[Union[str, TensorType]] = None,    # or TensorType.PYTORCH
+        **kwargs,
     ) -> BatchFeature:
+        if videos is not None:
+            raise ValueError("UrsaProcessor does not support video inputs.")
         image_inputs = {}
         if images is not None:
             image_inputs = self.image_processor(images, return_tensors=return_tensors)
+        text = self._normalize_image_placeholders(text)
         text_inputs = self.tokenizer(
-            text, return_tensors=return_tensors, padding=padding, truncation=truncation, max_length=max_length
+            text,
+            return_tensors=return_tensors,
+            padding=padding,
+            truncation=truncation,
+            max_length=max_length,
+            add_special_tokens=add_special_tokens,
+            **kwargs,
         )
         return BatchFeature(data={**text_inputs, **image_inputs})
 

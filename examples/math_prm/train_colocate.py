@@ -42,6 +42,11 @@ from typing import Callable, Dict, List, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers import (
+    AutoConfig,
+    AutoModelForTokenClassification,
+    AutoModelForVision2Seq,
+)
 
 from lightrft.utils import add_arguments, ensure_video_input_available
 ensure_video_input_available()
@@ -125,6 +130,38 @@ def load_actor_tokenizer_processor(
         "left",
         use_fast=use_fast,
     )
+
+
+def prepare_ursa_runtime_for_inference_engines(strategy=None):
+    """
+    Register the local URSA classes with HuggingFace auto classes so rollout
+    engines that rely on ``AutoConfig`` can resolve ``model_type='ursa'``.
+    """
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    if current_dir not in sys.path:
+        sys.path.insert(0, current_dir)
+
+    pythonpath = os.environ.get("PYTHONPATH")
+    pythonpath_parts = pythonpath.split(os.pathsep) if pythonpath else []
+    if current_dir not in pythonpath_parts:
+        os.environ["PYTHONPATH"] = os.pathsep.join([current_dir, *pythonpath_parts]) if pythonpath_parts else current_dir
+    os.environ["LIGHTRFT_REGISTER_URSA_AUTO_CLASSES"] = "1"
+
+    from ursa_model import (
+        UrsaConfig,
+        UrsaForConditionalGeneration,
+        UrsaForTokenClassification,
+    )
+
+    AutoConfig.register("ursa", UrsaConfig, exist_ok=True)
+    AutoModelForVision2Seq.register(UrsaConfig, UrsaForConditionalGeneration, exist_ok=True)
+    AutoModelForTokenClassification.register(UrsaConfig, UrsaForTokenClassification, exist_ok=True)
+
+    if strategy is not None:
+        strategy.print(
+            "Registered URSA auto classes for inference engines "
+            f"(sys.path/PYTHONPATH include {current_dir})"
+        )
 
 
 def train(args):
@@ -428,8 +465,17 @@ def train(args):
     os.makedirs(args.save_path, exist_ok=True)
     strategy.report_memory("after models init")
 
+    if is_ursa:
+        prepare_ursa_runtime_for_inference_engines(strategy)
+
     strategy.report_memory("before setup_inference_engine")
-    strategy.setup_inference_engine(args, engine_type=args.engine_type, actor=actor)
+    strategy.setup_inference_engine(
+        args,
+        engine_type=args.engine_type,
+        actor=actor,
+        tokenizer=tokenizer,
+        processor=processor,
+    )
     strategy.report_memory("after setup_inference_engine")
 
     # configure Trainer
@@ -508,7 +554,7 @@ def train(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--engine_type", type=str, default="vllm", help="Choose inference engine type: vllm, sglang")
+    parser.add_argument("--engine_type", type=str, default="vllm", help="Choose inference engine type: vllm, sglang, hf")
     parser.add_argument("--text_only", action="store_true", default=False)
 
     # Checkpoint
@@ -646,7 +692,7 @@ if __name__ == "__main__":
 
     # Evaluation dataset
     parser.add_argument("--eval_data", type=str, default=None, help="HF evaluation dataset name or path (default: use prompt_data)")
-    parser.add_argument("--eval_split", type=str, default="test", help="Evaluation data split (default: test)")
+    parser.add_argument("--eval_split", type=str, default="", help="Evaluation data split (default: disabled)")
     parser.add_argument("--max_eval_samples", type=int, default=500, help="Maximum number of samples to evaluate (default: 500)")
     
     parser.add_argument("--pretrain_data", type=str, default=None, help="HF dataset name or path")

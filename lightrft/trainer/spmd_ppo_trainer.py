@@ -321,6 +321,7 @@ class SPMDPPOTrainerBase:
             all_advantages = []
             all_returns = []
             all_response_lengths = []
+            all_total_lengths = []
 
             for item in self.replay_buffer.items:
                 # Collect rewards
@@ -346,6 +347,8 @@ class SPMDPPOTrainerBase:
                     all_returns.append(item.returns)
                 if hasattr(item, 'info') and item.info is not None and 'response_length' in item.info:
                     all_response_lengths.append(item.info['response_length'])
+                if hasattr(item, 'info') and item.info is not None and 'total_length' in item.info:
+                    all_total_lengths.append(item.info['total_length'])
 
             # Compute statistics
             # [TENSOR-FIX] Handle both tensor lists and scalar lists for all reward types
@@ -360,6 +363,8 @@ class SPMDPPOTrainerBase:
                 status_mean["step_reward_std"] = rewards_tensor.std().item()
                 status_mean["step_reward_max"] = rewards_tensor.max().item()
                 status_mean["step_reward_min"] = rewards_tensor.min().item()
+                status_mean["step_reward_zero_ratio"] = (rewards_tensor == 0).float().mean().item()
+                status_mean["step_reward_one_ratio"] = (rewards_tensor == 1).float().mean().item()
 
             if all_format_rewards:
                 # [TENSOR-FIX] Handle both tensor lists and scalar lists
@@ -387,6 +392,7 @@ class SPMDPPOTrainerBase:
                     model_tensor = torch.tensor(all_model_rewards, dtype=torch.float32, device=device)
                 if model_tensor.abs().sum() > 0:  # Only log if model rewards are non-zero
                     status_mean["model_reward_mean"] = model_tensor.mean().item()
+                    status_mean["model_reward_std"] = model_tensor.std().item()
                     self.strategy.print(f" model_reward_mean: {status_mean['model_reward_mean']}")
 
             if all_rule_rewards:
@@ -397,6 +403,7 @@ class SPMDPPOTrainerBase:
                     rule_tensor = torch.tensor(all_rule_rewards, dtype=torch.float32, device=device)
                 if rule_tensor.abs().sum() > 0:  # Only log if rule rewards are non-zero
                     status_mean["rule_reward_mean"] = rule_tensor.mean().item()
+                    status_mean["rule_reward_std"] = rule_tensor.std().item()
                     self.strategy.print(f"rule_reward_mean: {status_mean['rule_reward_mean']}")
 
             # For advantages, returns, and lengths, they are already lists of tensors,
@@ -421,6 +428,20 @@ class SPMDPPOTrainerBase:
                     lengths_tensor = torch.tensor(all_response_lengths, dtype=torch.float32, device=device)
                 status_mean["response_length_mean"] = lengths_tensor.float().mean().item()
                 status_mean["response_length_std"] = lengths_tensor.float().std().item()
+                status_mean["response_length_zero_ratio"] = (lengths_tensor <= 1).float().mean().item()
+                generate_max_len = getattr(self.args, "generate_max_len", None)
+                if generate_max_len:
+                    status_mean["response_hit_max_ratio"] = (
+                        lengths_tensor >= float(generate_max_len - 1)
+                    ).float().mean().item()
+
+            if all_total_lengths:
+                if isinstance(all_total_lengths[0], torch.Tensor):
+                    total_lengths_tensor = torch.cat([t.to(device).float() for t in all_total_lengths])
+                else:
+                    total_lengths_tensor = torch.tensor(all_total_lengths, dtype=torch.float32, device=device)
+                status_mean["total_length_mean"] = total_lengths_tensor.float().mean().item()
+                status_mean["total_length_std"] = total_lengths_tensor.float().std().item()
 
             # Print detailed reward breakdown (only on rank 0)
             if self.print_replay_buffer_stats and self.strategy.is_rank_0():
@@ -433,6 +454,10 @@ class SPMDPPOTrainerBase:
                         f"🎁 Total Reward:     {status_mean['step_reward_mean']:.4f} ± {status_mean['step_reward_std']:.4f} "  # noqa
                         f"(min={status_mean['step_reward_min']:.4f}, max={status_mean['step_reward_max']:.4f})"
                     )
+                    self.strategy.print(
+                        f"   Reward Ratios:    zero={status_mean['step_reward_zero_ratio']:.4f}, "
+                        f"one={status_mean['step_reward_one_ratio']:.4f}"
+                    )
 
                 if all_format_rewards:
                     self.strategy.print(
@@ -442,6 +467,16 @@ class SPMDPPOTrainerBase:
                 if all_accuracy_rewards:
                     self.strategy.print(
                         f"✅ Accuracy Reward:  {status_mean['accuracy_reward_mean']:.4f} ± {status_mean['accuracy_reward_std']:.4f}"  # noqa
+                    )
+
+                if all_model_rewards and "model_reward_mean" in status_mean:
+                    self.strategy.print(
+                        f"🤖 Model Reward:     {status_mean['model_reward_mean']:.4f} ± {status_mean['model_reward_std']:.4f}"  # noqa
+                    )
+
+                if all_rule_rewards and "rule_reward_mean" in status_mean:
+                    self.strategy.print(
+                        f"⚖️  Rule Reward:      {status_mean['rule_reward_mean']:.4f} ± {status_mean['rule_reward_std']:.4f}"  # noqa
                     )
 
                 if all_advantages:
@@ -458,6 +493,15 @@ class SPMDPPOTrainerBase:
                 if all_response_lengths:
                     self.strategy.print(
                         f"📏 Response Length:  {status_mean['response_length_mean']:.1f} ± {status_mean['response_length_std']:.1f} tokens"  # noqa
+                    )
+                    self.strategy.print(
+                        f"   Length Ratios:    empty={status_mean['response_length_zero_ratio']:.4f}, "
+                        f"hit_max={status_mean.get('response_hit_max_ratio', 0.0):.4f}"
+                    )
+
+                if all_total_lengths:
+                    self.strategy.print(
+                        f"📦 Total Length:     {status_mean['total_length_mean']:.1f} ± {status_mean['total_length_std']:.1f} tokens"  # noqa
                     )
 
                 self.strategy.print("=" * 60 + "\n")

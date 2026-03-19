@@ -48,7 +48,7 @@ class StrategyConfig:
     overlap_comm: bool = False
 
     # Engine and inference parameters
-    # (str): Inference engine type, defaults to "vllm"
+    # (str): Inference engine type, defaults to "vllm". Supported values include "vllm", "sglang", and "hf".
     engine_type: str = "vllm"
     # (int): Engine tensor parallelism size, defaults to 1
     engine_tp_size: int = 1

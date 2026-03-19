@@ -111,6 +111,8 @@ class StrategyBase(ABC):
         # inference (rollout) engine related
         self.inference_engine = None
         self.inference_engine_status = EngineStatus.SLEEPED
+        self.inference_tokenizer = None
+        self.inference_processor = None
         self.broadcast_manager = None
 
         self.time_steps = defaultdict(int)
@@ -185,7 +187,7 @@ class StrategyBase(ABC):
                 )
             # TODO: unify the init_process_group for both vllm and sglang when stable version finished
 
-            if self.config.engine_type in ("vllm", "sglang"):
+            if self.config.engine_type in ("vllm", "sglang", "hf"):
                 dist.init_process_group(
                     rank=rank,
                     world_size=world_size,
@@ -199,7 +201,7 @@ class StrategyBase(ABC):
                 raise ValueError(f"Unsupported backend: {self.config.engine_type}")
         else:
             # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
-            if self.config.engine_type in ("vllm", "sglang"):
+            if self.config.engine_type in ("vllm", "sglang", "hf"):
                 deepspeed.init_distributed(dist_backend="nccl", timeout=timeout)
             else:
                 raise ValueError(f"Unsupported backend: {self.config.engine_type}")
@@ -653,13 +655,13 @@ class StrategyBase(ABC):
                 f"ALLOCATED={torch.cuda.memory_allocated() / 1e9:.2f} GB"
             )
 
-    def setup_inference_engine(self, args, engine_type="vllm", actor=None):
+    def setup_inference_engine(self, args, engine_type="vllm", actor=None, tokenizer=None, processor=None):
         """
         Initialize and setup the inference engine.
 
         :param args: Configuration arguments
         :type args: argparse.Namespace
-        :param engine_type: Type of inference engine ('vllm' or 'sglang')
+        :param engine_type: Type of inference engine ('vllm', 'sglang', or 'hf')
         :type engine_type: str
         :param actor: The actor module, if passed, will be used to update engine weights
         :type actor: torch.nn.Module
@@ -669,6 +671,8 @@ class StrategyBase(ABC):
         :raises ValueError: If engine_type is not supported
         """
         self.inference_engine_type = engine_type
+        self.inference_tokenizer = tokenizer
+        self.inference_processor = processor
 
         if engine_type == "vllm":
             # Conditional import: vLLM is optional and only imported when explicitly requested
@@ -680,10 +684,16 @@ class StrategyBase(ABC):
             # Default inference engine: SGLang (no additional dependencies required)
             self.inference_engine = get_sglang_engine_for_rollout(args)
             self.inference_engine_status = EngineStatus.WAKEUP
+        elif engine_type == "hf":
+            if actor is None:
+                raise ValueError("engine_type='hf' requires the prepared actor to be passed in.")
+            # Local HF mode reuses the actor directly for time-boxed smoke runs.
+            self.inference_engine = actor
+            self.inference_engine_status = EngineStatus.WAKEUP
         else:
             raise ValueError(f"Unsupported engine type: {engine_type}")
 
-        if actor is not None:
+        if actor is not None and engine_type != "hf":
             self.update_engine_weights(actor)
         self.maybe_sleep_inference_engine()
         return self.inference_engine
@@ -700,6 +710,8 @@ class StrategyBase(ABC):
         if self.inference_engine is not None and self.args.enable_engine_sleep:
             if self.inference_engine_type in ["vllm", "sglang"]:
                 self.inference_engine.sleep()
+            elif self.inference_engine_type == "hf":
+                return
             else:
                 raise ValueError(f"Unsupported engine type: {self.inference_engine_type}")
             self.inference_engine_status = EngineStatus.SLEEPED
@@ -724,6 +736,9 @@ class StrategyBase(ABC):
 
         if self.inference_engine_type in ["vllm", "sglang"]:
             self.inference_engine.wake_up()
+        elif self.inference_engine_type == "hf":
+            self.inference_engine_status = EngineStatus.WAKEUP
+            return
         else:
             raise ValueError(f"Unsupported engine type: {self.inference_engine_type}")
         # torch.cuda.reset_max_memory_allocated()
@@ -737,6 +752,10 @@ class StrategyBase(ABC):
         sampling_params: Any,
         prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
         multi_modal_inputs: Optional[List[Dict[str, Any]]] = None,
+        pixel_values: Optional[torch.Tensor] = None,
+        image_grid_thw: Optional[torch.Tensor] = None,
+        pixel_values_videos: Optional[torch.Tensor] = None,
+        video_grid_thw: Optional[torch.Tensor] = None,
     ) -> List[EasyDict]:
         """
         Perform text or multimodal generation using different inference engines based on the input mode.
@@ -762,7 +781,7 @@ class StrategyBase(ABC):
         if prompt_token_ids is None and multi_modal_inputs is None:
             raise ValueError("Either prompt_token_ids or multi_modal_inputs must be provided.")
 
-        if prompt_token_ids is not None and multi_modal_inputs is not None:
+        if self.inference_engine_type != "hf" and prompt_token_ids is not None and multi_modal_inputs is not None:
             raise ValueError("Both prompt_token_ids and multi_modal_inputs can not be provided at the same time.")
 
         # if inference engine is vllm
@@ -828,6 +847,84 @@ class StrategyBase(ABC):
                         output_token_ids=sglang_outputs[i]["output_ids"],
                     ) for i in range(len(sglang_outputs))
                 ]
+        elif self.inference_engine_type == "hf":
+            if prompt_token_ids is None:
+                raise ValueError("Local HF inference requires prompt_token_ids.")
+
+            from lightrft.datasets.utils import zero_pad_sequences
+
+            model = getattr(self.inference_engine, "model", self.inference_engine)
+            model_config = getattr(model, "config", None)
+            eos_token_id = getattr(self.inference_tokenizer, "eos_token_id", None)
+            pad_token_id = getattr(self.inference_tokenizer, "pad_token_id", None)
+
+            if eos_token_id is None and model_config is not None:
+                eos_token_id = getattr(model_config, "eos_token_id", None)
+            if pad_token_id is None and model_config is not None:
+                pad_token_id = getattr(model_config, "pad_token_id", None)
+
+            if isinstance(eos_token_id, (list, tuple)):
+                eos_token_id = eos_token_id[0]
+            if isinstance(pad_token_id, (list, tuple)):
+                pad_token_id = pad_token_id[0]
+            if pad_token_id is None:
+                pad_token_id = eos_token_id
+            if eos_token_id is None:
+                raise ValueError("Unable to resolve eos_token_id for local HF inference engine.")
+
+            prompt_tensors = []
+            normalized_prompt_ids = []
+            for token_ids in prompt_token_ids:
+                if isinstance(token_ids, torch.Tensor):
+                    token_ids = token_ids.tolist()
+                normalized_prompt_ids.append(token_ids)
+                prompt_tensors.append(torch.tensor(token_ids, dtype=torch.long))
+
+            device = torch.cuda.current_device()
+            padded_input_ids = zero_pad_sequences(prompt_tensors, side="left", value=pad_token_id).to(device)
+            attention_mask = padded_input_ids.ne(pad_token_id).long()
+
+            def _prepare_tensor(tensor):
+                if tensor is None:
+                    return None
+                if isinstance(tensor, torch.Tensor) and tensor.numel() == 0:
+                    return None
+                return tensor.to(device, non_blocking=True)
+
+            top_k = sampling_params.get("top_k", None)
+            if top_k is not None and top_k <= 0:
+                top_k = None
+            temperature = sampling_params.get("temperature", 1.0)
+            do_sample = sampling_params.get("do_sample", temperature is None or temperature > 0)
+
+            with torch.no_grad():
+                sequences, _, _ = self.inference_engine.generate(
+                    input_ids=padded_input_ids,
+                    attention_mask=attention_mask,
+                    pixel_values=_prepare_tensor(pixel_values),
+                    image_grid_thw=_prepare_tensor(image_grid_thw),
+                    pixel_values_videos=_prepare_tensor(pixel_values_videos),
+                    video_grid_thw=_prepare_tensor(video_grid_thw),
+                    top_k=top_k,
+                    top_p=sampling_params.get("top_p", 1.0),
+                    temperature=temperature,
+                    do_sample=do_sample,
+                    max_new_tokens=sampling_params.get("max_new_tokens", 1024),
+                    min_new_tokens=sampling_params.get("min_new_tokens", 1),
+                    eos_token_id=eos_token_id,
+                    pad_token_id=pad_token_id,
+                )
+
+            output_start_idx = padded_input_ids.size(1)
+            sequences = sequences.detach().cpu()
+
+            return [
+                EasyDict(
+                    prompt_token_ids=normalized_prompt_ids[idx],
+                    output_token_ids=sequences[idx, output_start_idx:].tolist(),
+                )
+                for idx in range(sequences.size(0))
+            ]
         else:
             raise ValueError(f"Unsupported engine type: {self.inference_engine_type}")
 
@@ -916,6 +1013,10 @@ class StrategyBase(ABC):
         images_num=None,
         all_videos=None,
         videos_num=None,
+        all_images_pixel_values=None,
+        all_videos_pixel_values=None,
+        all_images_grid_thw=None,
+        all_videos_grid_thw=None,
     ):
         """
         Gather prompts across distributed ranks and perform text/multimodal generation.
@@ -965,35 +1066,49 @@ class StrategyBase(ABC):
         is_multimodal = (((all_images is not None) and any(img is not None for img in all_images))
                          or ((all_videos is not None) and any(vid is not None for vid in all_videos)))
 
-        if is_multimodal:
-            inputs = self._build_multimodal_inputs(
-                all_prompts=all_prompts,
-                all_images=all_images,
-                images_num=images_num,
-                all_videos=all_videos,
-                videos_num=videos_num,
-            )
-        else:
+        if self.inference_engine_type == "hf":
             inputs = all_prompt_token_ids
             assert inputs is not None
+            self.print(f"Start VLM gather_and_generate ..., total prompts: {len(inputs)}")
+            all_outputs = self.engine_generate_local(
+                sampling_params=sampling_params,
+                prompt_token_ids=inputs,
+                pixel_values=all_images_pixel_values if is_multimodal else None,
+                image_grid_thw=all_images_grid_thw if is_multimodal else None,
+                pixel_values_videos=all_videos_pixel_values if is_multimodal else None,
+                video_grid_thw=all_videos_grid_thw if is_multimodal else None,
+            )
+            local_outputs = all_outputs
+        else:
+            if is_multimodal:
+                inputs = self._build_multimodal_inputs(
+                    all_prompts=all_prompts,
+                    all_images=all_images,
+                    images_num=images_num,
+                    all_videos=all_videos,
+                    videos_num=videos_num,
+                )
+            else:
+                inputs = all_prompt_token_ids
+                assert inputs is not None
 
-        inputs = gather_inputs_object_for_inference(input_data=inputs, group=self.engine_mp_group)
+            inputs = gather_inputs_object_for_inference(input_data=inputs, group=self.engine_mp_group)
 
-        self.print(f"Start VLM gather_and_generate ..., total prompts: {len(inputs)}")
+            self.print(f"Start VLM gather_and_generate ..., total prompts: {len(inputs)}")
 
-        all_outputs = self.engine_generate_local(
-            sampling_params=sampling_params,
-            prompt_token_ids=None if is_multimodal else inputs,
-            multi_modal_inputs=inputs if is_multimodal else None,
-        )
+            all_outputs = self.engine_generate_local(
+                sampling_params=sampling_params,
+                prompt_token_ids=None if is_multimodal else inputs,
+                multi_modal_inputs=inputs if is_multimodal else None,
+            )
 
-        engine_mp_size = torch.distributed.get_world_size(self.engine_mp_group)
-        num_prompts_per_rank = len(all_outputs) // engine_mp_size
-        assert len(all_outputs) % engine_mp_size == 0
-        cur_rank = torch.distributed.get_rank(self.engine_mp_group)
-        local_outputs = all_outputs[cur_rank * num_prompts_per_rank:(cur_rank + 1) * num_prompts_per_rank]
+            engine_mp_size = torch.distributed.get_world_size(self.engine_mp_group)
+            num_prompts_per_rank = len(all_outputs) // engine_mp_size
+            assert len(all_outputs) % engine_mp_size == 0
+            cur_rank = torch.distributed.get_rank(self.engine_mp_group)
+            local_outputs = all_outputs[cur_rank * num_prompts_per_rank:(cur_rank + 1) * num_prompts_per_rank]
 
-        if self.inference_engine_type == "sglang":
+        if is_multimodal and self.inference_engine_type == "sglang":
             # For SGLang VLM case, prompt_token_ids is set to None in engine_generate_local
             # We need to fill it with the actual token_ids here
             for i, output in enumerate(local_outputs):
@@ -1019,6 +1134,9 @@ class StrategyBase(ABC):
         """
         if self.inference_engine is None:
             self.print("Skip update engine weights since inference engine is not initialized.")
+            return
+        if self.inference_engine_type == "hf":
+            self.print("Skip update engine weights for local HF engine because it reuses the actor directly.")
             return
         # 1. wakeup engine if sleeped
         self.wakeup_inference_engine()
