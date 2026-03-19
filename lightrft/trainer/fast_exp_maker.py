@@ -22,7 +22,6 @@ Classes:
 """
 
 import os
-import re
 import time
 import pathlib
 import warnings
@@ -54,6 +53,10 @@ from lightrft.trainer.experience_maker_vl import (
 
 from lightrft.utils.remote_rm_utils import remote_rm_fn
 from lightrft.utils import Timer, get_current_device
+from lightrft.utils.math_prm_output import (
+    is_math_prm_structured_label,
+    sanitize_math_prm_response_text,
+)
 from .utils import RunningMoments, compute_clip_fraction, get_cpgd_advantages_returns, fire_sampling, vllm_ge_0130
 from .advantage_calculator import get_advantage_calculator, normalize_advantages_cross_batch
 from .image_utils import normalize_images, get_images_num
@@ -62,59 +65,6 @@ from .video_utils import normalize_videos, get_videos_num
 # ============================================================================
 # Data Structures
 # ============================================================================
-
-_MATH_PRM_STRUCTURED_LABELS = {"math_prm", "math_prm_combined"}
-_MATH_PRM_ANSWER_MARKER = "†Answer:"
-_MAX_MATH_PRM_ANSWER_WORDS = 24
-_MAX_MATH_PRM_ANSWER_CHARS = 160
-
-
-def _is_math_prm_structured_label(label: Optional[str]) -> bool:
-    return isinstance(label, str) and label.lower() in _MATH_PRM_STRUCTURED_LABELS
-
-
-def _find_math_prm_tail_cutoff(text: str) -> Optional[int]:
-    cut_positions = []
-    for pattern in (
-        r"(?<!^)(?:†Answer:|Step\s+\d+:)",
-        r"([0-9])\1{15,}",
-        r"([A-Za-z])\1{15,}",
-        r"(\b\S+\b)(?:\s+\1){3,}",
-        r"(\b\S+\s+\S+\b)(?:\s+\1){2,}",
-    ):
-        match = re.search(pattern, text)
-        if match:
-            cut_positions.append(match.start())
-    return min(cut_positions) if cut_positions else None
-
-
-def sanitize_math_prm_response_text(response_text: str) -> str:
-    if not response_text:
-        return response_text
-
-    normalized_text = re.sub(r"(?m)^StepStep\s+(\d+:)", r"Step \1", response_text)
-    marker_index = normalized_text.find(_MATH_PRM_ANSWER_MARKER)
-    if marker_index < 0:
-        return normalized_text
-
-    prefix = normalized_text[: marker_index + len(_MATH_PRM_ANSWER_MARKER)]
-    answer_tail = normalized_text[marker_index + len(_MATH_PRM_ANSWER_MARKER):].lstrip()
-    answer_line = answer_tail.splitlines()[0] if answer_tail else ""
-    answer_line = " ".join(answer_line.split())
-
-    cutoff = _find_math_prm_tail_cutoff(answer_line)
-    if cutoff is not None:
-        answer_line = answer_line[:cutoff]
-
-    answer_words = answer_line.split()
-    if len(answer_words) > _MAX_MATH_PRM_ANSWER_WORDS:
-        answer_line = " ".join(answer_words[:_MAX_MATH_PRM_ANSWER_WORDS])
-    if len(answer_line) > _MAX_MATH_PRM_ANSWER_CHARS:
-        truncated = answer_line[:_MAX_MATH_PRM_ANSWER_CHARS]
-        answer_line = truncated.rsplit(" ", 1)[0] or truncated
-
-    answer_line = answer_line.rstrip(" ,;:")
-    return prefix.rstrip() if not answer_line else f"{prefix} {answer_line}".rstrip()
 
 
 @dataclass
@@ -1233,6 +1183,9 @@ class FastExperienceMaker(NaiveExperienceMaker):
         # ========== Expand Labels ==========
         if all_labels is not None:
             all_labels = sum([[label] * n_samples for label in all_labels], [])
+        structured_answer_stop = bool(all_labels) and all(is_math_prm_structured_label(label) for label in all_labels)
+        if config.engine_type == "hf":
+            sampling_params["structured_answer_stop"] = structured_answer_stop
 
         # ========== Process Multimodal Data ==========
         if is_multimodal:
@@ -1393,7 +1346,7 @@ class FastExperienceMaker(NaiveExperienceMaker):
         trimmed_token_counts = []
 
         for idx, label in enumerate(labels[: len(outputs)]):
-            if not _is_math_prm_structured_label(label):
+            if not is_math_prm_structured_label(label):
                 continue
 
             original_ids = list(outputs[idx].output_token_ids)

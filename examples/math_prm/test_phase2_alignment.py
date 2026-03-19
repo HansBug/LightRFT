@@ -17,7 +17,7 @@ if str(MATH_PRM_DIR) not in sys.path:
 from reward_models import MathPRMReward
 from reward_models_utils import RewardModelType, load_reward_models, mix_rewards
 from lightrft.models.actor_vl import ActorVL
-from lightrft.trainer.fast_exp_maker import sanitize_math_prm_response_text
+from lightrft.utils.math_prm_output import sanitize_math_prm_response_text, should_stop_math_prm_response_text
 
 
 REFERENCE_PROMPT = (
@@ -383,6 +383,11 @@ class Phase2AlignmentTests(unittest.TestCase):
             sanitize_math_prm_response_text(response),
             "Step 1: Compute y = 5x + 7.\nStep 2: Substitute x = 6.\n†Answer: 37",
         )
+
+    def test_should_stop_math_prm_response_detects_short_final_answers(self):
+        self.assertTrue(should_stop_math_prm_response_text("Step 1: Inspect.\n†Answer: yes"))
+        self.assertTrue(should_stop_math_prm_response_text("Step 1: Compute.\n†Answer: 37"))
+        self.assertFalse(should_stop_math_prm_response_text("Step 1: Compute carefully."))
 
     def test_actor_vl_casts_multimodal_tensors_to_model_dtype(self):
         fake_model = FakeVisionLanguageModel()

@@ -27,6 +27,7 @@ from torch import nn, optim
 from torch.distributed.device_mesh import init_device_mesh
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
+from transformers.generation.logits_process import LogitsProcessor, LogitsProcessorList
 from transformers.trainer import get_scheduler
 
 from lightrft.strategy.utils.distributed_util import gather_inputs_object_for_inference, create_sub_group
@@ -39,6 +40,7 @@ from lightrft.strategy.utils.parallel_utils import (
 )
 from lightrft.strategy.utils.statistic import GenLenAnalyser
 from lightrft.strategy.config import StrategyConfig
+from lightrft.utils.math_prm_output import should_stop_math_prm_response_text
 from .sglang_utils import get_sglang_engine_for_rollout
 
 ModelOptimPair = Tuple[nn.Module, Optimizer]
@@ -55,6 +57,32 @@ class EngineStatus(Enum):
 
     SLEEPED = 0
     WAKEUP = 1
+
+
+class _StructuredAnswerEosLogitsProcessor(LogitsProcessor):
+    def __init__(self, tokenizer, prompt_length: int, eos_token_id: int):
+        self.tokenizer = tokenizer
+        self.prompt_length = int(prompt_length)
+        self.eos_token_id = int(eos_token_id)
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        if input_ids.size(1) <= self.prompt_length:
+            return scores
+
+        generated_ids = input_ids[:, self.prompt_length:].detach().cpu()
+        decoded_rows = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=False)
+        stop_mask = torch.tensor(
+            [should_stop_math_prm_response_text(text) for text in decoded_rows],
+            device=scores.device,
+            dtype=torch.bool,
+        )
+        if not torch.any(stop_mask):
+            return scores
+
+        forced_scores = scores.clone()
+        forced_scores[stop_mask] = torch.finfo(forced_scores.dtype).min
+        forced_scores[stop_mask, self.eos_token_id] = 0
+        return forced_scores
 
 
 class StrategyBase(ABC):
@@ -896,15 +924,27 @@ class StrategyBase(ABC):
                 top_k = None
             temperature = sampling_params.get("temperature", 1.0)
             do_sample = sampling_params.get("do_sample", temperature is None or temperature > 0)
+            logits_processor = None
+            if sampling_params.get("structured_answer_stop", False):
+                logits_processor = LogitsProcessorList(
+                    [
+                        _StructuredAnswerEosLogitsProcessor(
+                            self.inference_tokenizer,
+                            padded_input_ids.size(1),
+                            eos_token_id,
+                        )
+                    ]
+                )
 
             with torch.no_grad():
-                sequences, _, _ = self.inference_engine.generate(
+                sequences, attention_mask_out, _ = self.inference_engine.generate(
                     input_ids=padded_input_ids,
                     attention_mask=attention_mask,
                     pixel_values=_prepare_tensor(pixel_values),
                     image_grid_thw=_prepare_tensor(image_grid_thw),
                     pixel_values_videos=_prepare_tensor(pixel_values_videos),
                     video_grid_thw=_prepare_tensor(video_grid_thw),
+                    logits_processor=logits_processor,
                     top_k=top_k,
                     top_p=sampling_params.get("top_p", 1.0),
                     temperature=temperature,
@@ -919,14 +959,19 @@ class StrategyBase(ABC):
 
             output_start_idx = padded_input_ids.size(1)
             sequences = sequences.detach().cpu()
+            attention_mask_out = attention_mask_out.detach().cpu()
 
-            return [
-                EasyDict(
-                    prompt_token_ids=normalized_prompt_ids[idx],
-                    output_token_ids=sequences[idx, output_start_idx:].tolist(),
+            engine_outputs = []
+            for idx in range(sequences.size(0)):
+                total_length = int(attention_mask_out[idx].sum().item())
+                total_length = max(total_length, output_start_idx)
+                engine_outputs.append(
+                    EasyDict(
+                        prompt_token_ids=normalized_prompt_ids[idx],
+                        output_token_ids=sequences[idx, output_start_idx:total_length].tolist(),
+                    )
                 )
-                for idx in range(sequences.size(0))
-            ]
+            return engine_outputs
         else:
             raise ValueError(f"Unsupported engine type: {self.inference_engine_type}")
 

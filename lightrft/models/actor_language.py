@@ -210,6 +210,7 @@ class ActorLanguage(nn.Module):
             use_cache=True,
             num_beams=kwargs.get("num_beams", 1),
             attention_mask=kwargs.get("attention_mask"),
+            logits_processor=kwargs.get("logits_processor"),
             eos_token_id=kwargs.get("eos_token_id"),
             pad_token_id=kwargs.get("pad_token_id"),
             min_new_tokens=kwargs.get("min_new_tokens", 1),

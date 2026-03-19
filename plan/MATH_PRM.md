@@ -744,6 +744,73 @@ Phase 3 范畴内修复后的第二次 smoke（2026-03-19）：
   - **Phase 3 的训练侧 metrics 已从“明显异常”恢复到“可继续观察与迭代”**
   - **但 raw generation 仍有强烈超长倾向，且答案正确性/PRM 分数仍偏弱，因此还不应直接视为最终健康通过**
 
+Phase 3 范畴内修复后的第三次 smoke（2026-03-19）：
+
+- 试跑日志：`/data/LightRFT/tmp/ursa_stage3/phase3_smoke/phase3_smoke_20260319_095529.log`
+- 这次新增的修复重点不是 reward，而是把 stopping 再往前推到 HF 本地生成链路本身：
+  - 让结构化 answer 规则在 generation 时就尝试强制收尾到 `eos`
+  - 修正 local HF inference 里 `output_token_ids` 的截取方式，不再把 `eos` 后的整段 padding 一起误算成“生成长度”
+- 本轮 smoke 在拿到足够判断健康度的首批日志后主动停止，并清理了相关进程与 GPU
+- 这轮最关键的变化是：
+  - 第一批 `step 0 generate length` 不再是伪 `1024`
+  - 实际变为：`min=60`、`max=256`、`mean=120.25`、`median=105`
+  - 说明 generation-time stopping / output trimming 已经把“首批 raw generate 结构性顶满上限”的问题显著压下
+- 同时：
+  - postprocess 只剩 `sanitized 1/2 outputs`
+  - 而且只裁掉了 `2` 个 token
+  - 这和上一轮动辄裁掉 `900+` token 相比，说明当前 stopping 已不再主要依赖后处理兜底
+- 第一批样例输出仍保持干净的 `Step ... / †Answer: yes`
+- 第一批 `rollout_response_length=87`，仍处于上一轮已经恢复出的健康短响应区间
+
+因此，Phase 3 当前状态应再往前更新一档：
+
+- **raw generation 顶满 `1024` 的主问题，在最新 smoke 首批里已被修复到基本可控**
+- **当前主要剩余问题，已经从“结构化 stopping 异常”转移到“答案正确性弱、PRM reward 偏低”**
+- **后续 Phase 3 继续迭代时，应把关注点更多放到 prompt/data 对齐与正确性质量，而不是继续把主要时间花在长尾乱码收尾上**
+
+Phase 3 当前总结（2026-03-19）：
+
+- 当前阶段状态可以概括为：
+  - **训练主链路已打通**
+  - **结构化输出与 stopping 问题已基本修住**
+  - **还不能记为最终健康通过**
+  - **剩余主问题已收敛为 correctness 偏弱、PRM reward 偏低**
+- 也就是说，Phase 3 现在已经不是“脚本一跑就长尾乱码、完全不正常”，而是：
+  - rollout / reward / PPO / cleanup 都能正常走通
+  - `Step N:` / `†Answer:` 格式已经基本稳定
+  - 生成长度已经回到合理区间
+  - 但模型答案质量还没有稳定到可以直接宣告 Phase 3 结束
+
+这几轮里实际采用的修复方法也需要统一记录为：
+
+- 第一步：确认问题主要不在 Phase 4 缺失，而在 Phase 3 自身的 rollout / decode / stopping
+  - 依据是最早那批异常输出发生在第一次 PPO 更新前
+- 第二步：先用 Phase 3 范畴内的 postprocess 兜底
+  - 对 `math_prm` / `math_prm_combined` 输出做首个 `†Answer:` 后截断
+  - 清理 `StepStep 1:`、重复 `†Answer:`、重复字符尾巴、长重复词串
+- 第三步：收紧 smoke decode 参数
+  - 使用更保守的 `temperature / top_p / top_k / repetition_penalty / no_repeat_ngram_size`
+- 第四步：把 stopping 再前推到 HF 本地生成阶段本身
+  - 不再只依赖 postprocess 收尾
+  - 在 generation-time 触发结构化 answer 规则并强制向 `eos` 收尾
+- 第五步：修正 local HF inference 的输出截取
+  - 不再把 `eos` 后面的 padding 误记进 `output_token_ids`
+  - 从而让 `step 0 generate length` 和后续统计回到真实值
+
+这些修复之后，问题演变可以概括为：
+
+- 最开始的问题：
+  - raw generate 固定顶满 `1024`
+  - 输出里有 `Camp Miniwauca`、`7777...`、重复 `†Answer:`、`StepStep 1:`
+- 中间状态：
+  - 依靠 postprocess 已能把脏尾巴裁掉
+  - 训练侧 `response_length` 已明显恢复
+  - 但 raw generate 本身仍然假性顶满
+- 当前状态：
+  - raw generate 长度本身已降到合理范围
+  - postprocess 只剩轻量补边角
+  - Phase 3 的主要矛盾已经转成“如何把答案质量和 reward 拉起来”
+
 对当前异常原因的判断（2026-03-19）：
 
 - 当前判断是：**Phase 3 异常生成的主因，不是因为 Phase 4 的 PS-GRPO / correctness / drop-moment 还没上**
