@@ -8,7 +8,7 @@
 # Key features:
 #   - Actor: URSA-8B (hybrid vision tower + Qwen2.5-Math-Instruct)
 #   - Reward: URSA-8B-RM (process reward model for step-level scoring)
-#   - Algorithm: Phase 3 baseline GRPO with pure math_prm reward
+#   - Algorithm: Phase 4 GRPO with PS-GRPO reward via math_psgrpo label
 #   - Dataset: converted MMathCoT-1M Stage 3 manifest
 #
 # Step-scoring protocol (see MathPRMReward in reward_models.py):
@@ -16,7 +16,7 @@
 #   2. The response is formatted with "Step N:" headings and "†Answer:" prefix.
 #   3. Each step boundary is marked with Cyrillic ' и' (U+0438) token.
 #   4. A single forward pass through URSA-8B-RM yields per-step probabilities.
-#   5. In Phase 3, the minimum step score is used as the final sequence reward.
+#   5. In Phase 4, MathPRMReward maps step scores + correctness to PS-GRPO reward.
 #
 
 ################################################################################
@@ -43,14 +43,16 @@ PATH_TO_URSA_RM="${PATH_TO_URSA_RM:-/home/ubuntu/URSA-MATH/checkpoints/URSA-RM-8
 # Dataset format:
 #   "prompt"  : the math question (string, may include images)
 #   "images"  : list of image paths (optional, for multimodal problems)
-#   "label"   : "math_prm"  →  triggers PRM-only reward
+#   "label"   : "math_psgrpo" → triggers Phase 4 PS-GRPO reward
+#               "math_prm"  →  Phase 3 baseline PRM-only reward
 #               "math_prm_combined" → PRM + rule-based accuracy
 #   "reference": ground-truth answer string (optional, for rule-based component)
 # See examples/data_preprocess/ for preprocessing helpers.
-PATH_TO_YOUR_MATH_DATASET="${PATH_TO_YOUR_MATH_DATASET:-/data/LightRFT/tmp/ursa_stage3/mmathcot_stage3_math_prm.jsonl}"
+PATH_TO_YOUR_MATH_DATASET="${PATH_TO_YOUR_MATH_DATASET:-/data/LightRFT/tmp/ursa_stage3/mmathcot_stage3_math_psgrpo.jsonl}"
+EXPECTED_REWARD_LABEL="${EXPECTED_REWARD_LABEL:-math_psgrpo}"
 
 # --- Experiment metadata ---
-EXPERIMENT_NAME="${EXPERIMENT_NAME:-lightrft-ursa8b-math-prm-grpo-phase3}"
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-lightrft-ursa8b-math-prm-grpo-phase4}"
 
 # --- W&B ---
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
@@ -61,7 +63,7 @@ export WANDB_PROJECT="${WANDB_PROJECT:-LightRFT-URSA8B-Stage3}"
 #                       Part 2: Training Hyperparameters                       #
 ################################################################################
 
-# --- GRPO (Phase 3 baseline: reward = min(step_scores)) ---
+# --- GRPO (Phase 4: reward = PS-GRPO over PRM step scores + correctness) ---
 N_SAMPLES="${N_SAMPLES:-8}"           # Responses per prompt (must be > 1 for group_norm).
 EPISODE="${EPISODE:-20}"              # Total training episodes.
 WARMUP="${WARMUP:-0.03}"              # LR warmup ratio.
@@ -138,11 +140,45 @@ export NCCL_DEBUG="WARN"
 export IGNORE_EOS=0
 export WANDB_MODE="${WANDB_MODE:-offline}"   # Set to "online" for real-time W&B logging.
 
+python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+dataset_path = Path(os.environ["PATH_TO_YOUR_MATH_DATASET"])
+expected_label = os.environ["EXPECTED_REWARD_LABEL"]
+if not dataset_path.exists():
+    raise SystemExit(f"[run_grpo_math_prm_ursa_8b.sh] Dataset not found: {dataset_path}")
+
+seen = set()
+with dataset_path.open("r", encoding="utf-8") as f:
+    for idx, line in enumerate(f):
+        if idx >= 128:
+            break
+        line = line.strip()
+        if not line:
+            continue
+        record = json.loads(line)
+        seen.add(record.get("label"))
+
+if seen != {expected_label}:
+    raise SystemExit(
+        "[run_grpo_math_prm_ursa_8b.sh] Expected dataset label "
+        f"{expected_label!r}, but sampled labels were {sorted(seen)!r}. "
+        "Rebuild the manifest with examples/math_prm/prepare_ursa_stage3_manifest.py "
+        "or override EXPECTED_REWARD_LABEL if you intentionally want another reward path."
+    )
+print(
+    "[run_grpo_math_prm_ursa_8b.sh] Dataset label check passed: "
+    f"{expected_label!r} from {dataset_path}"
+)
+PY
+
 # JSON config passed to --reward_pretrain.
 # Format: '{"<type>": "<path>"}' where <type> must match a RewardModelType value.
 # URSA-8B-RM is a text-only HF model → engine mode NOT recommended for PRM
 # (requires logit access).  The builder in reward_models_utils.py ignores
-# use_engine for math_prm and loads via HF directly.
+# use_engine for math_prm/math_psgrpo and loads via HF directly.
 REWARD_PRETRAIN_PATHS="{\"math_prm\":\"${PATH_TO_URSA_RM}\"}"
 
 WANDB_ARGS=()

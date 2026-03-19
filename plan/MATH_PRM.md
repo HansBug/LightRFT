@@ -862,6 +862,65 @@ Checklist：
 
 ### Phase 4：实现并对齐 PS-GRPO reward 语义
 
+状态：
+
+- 已完成
+- `math_prm` 保持为 Phase 3 baseline：reward = `min(step_scores)`
+- `math_psgrpo` 已落地为 Phase 4 路径：reward = correctness + drop-moment 映射后的最终 PS-GRPO reward
+
+本轮实际落地：
+
+- `examples/math_prm/reward_models.py`
+  - `MathPRMReward` 现在直接输出结构化结果，而不是只返回单个 scalar
+  - 为避免破坏已有 Phase 2/Phase 3 工具链，`MathPRMReward.forward(...)` 保留了旧接口兼容：
+    - 不传 `references/labels` 时仍返回 legacy tensor
+    - Phase 4 新链路传 `references/labels` 时返回结构化 metrics
+  - 对每条样本保留 `step_scores` 的聚合统计：`step_score_min` / `step_score_mean` / `step_score_last` / `step_count`
+  - 新增 `rho = 0.3` 的 relative-drop 检测
+  - 新增 `†Answer:` 优先的 final answer 抽取逻辑，缺失时回退到 `math_eval_utils.extract_answer(...)`
+  - 复用 `lightrft/evaluation/math_eval_utils.py` 做 reference 标准化与 correctness 判断
+  - 对 `math_psgrpo` 显式输出：
+    - `outcome_correct`
+    - `max_relative_drop`
+    - `has_drop_moment`
+    - `final_reward`
+  - 最终 reward 映射已经固定为：
+    - 正确且无 drop = `1.0`
+    - 正确但有 drop = `0.5`
+    - 错误 = `0.0`
+- `examples/math_prm/reward_models_utils.py`
+  - 新增 `math_psgrpo` recipe / label 路径
+  - 保持 `math_prm` 与 `math_psgrpo` 语义分离
+  - `math_psgrpo` 与 `math_prm` 一样都不再混入全局 format reward
+- `lightrft/trainer/fast_exp_maker.py`
+  - 单 RM 路径现在会保留 reward model 返回的辅助指标，不再在 reward aggregation 里丢失
+- `lightrft/trainer/spmd_ppo_trainer.py`
+  - 训练阶段会聚合并打印：
+    - `outcome_correct`
+    - `final_reward`
+    - `max_relative_drop`
+    - `has_drop_moment`
+    - `step_score_min` / `step_score_mean` / `step_score_last` / `step_count`
+- `lightrft/trainer/ppo_trainer_vl.py`
+  - rollout/eval 统计也改为透传并聚合 reward_metrics
+- `examples/math_prm/prepare_ursa_stage3_manifest.py`
+  - 默认 manifest label 已切到 `math_psgrpo`
+  - 默认输出文件名也切到 `mmathcot_stage3_math_psgrpo.*`
+- `examples/math_prm/run_grpo_math_prm_ursa_8b.sh`
+  - 默认训练数据路径切到 `math_psgrpo` manifest
+  - 增加 dataset label 预检查，默认要求样本 label 为 `math_psgrpo`
+
+验证：
+
+- `python -m unittest -q examples.math_prm.test_phase2_alignment`
+  - 通过
+- 新增并通过的对齐点：
+  - `math_psgrpo` label 在 `mix_rewards()` 中可正常走通
+  - `MathPRMReward._compute_psgrpo_metrics(...)` 对三种 reward 映射都符合预期
+  - `MathPRMReward.forward(...)` 在 `math_psgrpo` 标签下会返回结构化 metrics，并输出正确的 `0.5` 奖励样例
+- `bash -n examples/math_prm/run_grpo_math_prm_ursa_8b.sh`
+  - 通过
+
 目标：
 
 - 将 reward 从“PRM 聚合分数”推进到论文定义的 PS-GRPO
@@ -892,20 +951,20 @@ Phase 4 与 Phase 3 的关系需要明确为：
 
 Checklist：
 
-- [ ] 明确 `MathPRMReward` 是直接输出最终 reward，还是输出结构化中间信息
-- [ ] 确认可以拿到完整 `step_scores`
-- [ ] 实现 relative drop 计算逻辑
-- [ ] 实现 `rho = 0.3` 的 drop-moment 判定
-- [ ] 实现最终答案抽取逻辑
-- [ ] 实现 reference 标准化逻辑
-- [ ] 实现 outcome correctness 判定逻辑
-- [ ] 实现 `gamma = 0.5` 的最终 reward 映射
-- [ ] 确认最终 reward 只取 `{1.0, 0.5, 0.0}` 或论文允许的等价值
-- [ ] 对齐检查：正确且无 drop 的样本 reward 为 `1.0`
-- [ ] 对齐检查：正确但有 drop 的样本 reward 为 `0.5`
-- [ ] 对齐检查：错误样本 reward 为 `0.0`
-- [ ] 对齐检查：与原始论文公式的变量定义一致，不混入额外 heuristic
-- [ ] 日志中输出 step_scores、max_relative_drop、has_drop_moment、outcome_correct、final_reward 便于排查
+- [x] 明确 `MathPRMReward` 是直接输出最终 reward，还是输出结构化中间信息
+- [x] 确认可以拿到完整 `step_scores`
+- [x] 实现 relative drop 计算逻辑
+- [x] 实现 `rho = 0.3` 的 drop-moment 判定
+- [x] 实现最终答案抽取逻辑
+- [x] 实现 reference 标准化逻辑
+- [x] 实现 outcome correctness 判定逻辑
+- [x] 实现 `gamma = 0.5` 的最终 reward 映射
+- [x] 确认最终 reward 只取 `{1.0, 0.5, 0.0}` 或论文允许的等价值
+- [x] 对齐检查：正确且无 drop 的样本 reward 为 `1.0`
+- [x] 对齐检查：正确但有 drop 的样本 reward 为 `0.5`
+- [x] 对齐检查：错误样本 reward 为 `0.0`
+- [x] 对齐检查：与原始论文公式的变量定义一致，不混入额外 heuristic
+- [x] 日志中输出 `step_score_min` / `step_score_mean` / `step_score_last`、`max_relative_drop`、`has_drop_moment`、`outcome_correct`、`final_reward` 便于排查
 
 ### Phase 5：答案判定与行为对齐专项检查
 

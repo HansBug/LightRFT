@@ -1000,6 +1000,9 @@ RECIPE: Dict[str, List[Tuple[str, Optional[str], float]]] = {
     # Math PRM Phase 3 baseline: reward is exactly min(step_scores) from URSA-RM.
     # Format is tracked separately as a diagnostic metric but MUST NOT affect reward.
     "math_prm":        [("model", "math_prm", 1.0)],
+    # Math PRM Phase 4: PS-GRPO reward is computed inside MathPRMReward.
+    # We still reuse the same URSA-RM loader key ("math_prm") underneath.
+    "math_psgrpo":     [("model", "math_prm", 1.0)],
     # Math PRM + rule-based accuracy ablation. Still no implicit global format bonus.
     "math_prm_combined": [("model", "math_prm", 1.0), ("rule", None, 0.5)],
     # Ablation: rule-only baseline to compare against PRM
@@ -1009,6 +1012,7 @@ RECIPE: Dict[str, List[Tuple[str, Optional[str], float]]] = {
 
 NO_GLOBAL_FORMAT_REWARD_LABELS = {
     "math_prm",
+    "math_psgrpo",
     "math_prm_combined",
     "math_rule",
 }
@@ -1069,6 +1073,10 @@ def mix_rewards(
         'accuracy_reward': torch.zeros(B, dtype=torch.float32, device=device),
         'model_reward': torch.zeros(B, dtype=torch.float32, device=device),
         'rule_reward': torch.zeros(B, dtype=torch.float32, device=device),
+        'outcome_correct': torch.zeros(B, dtype=torch.float32, device=device),
+        'max_relative_drop': torch.zeros(B, dtype=torch.float32, device=device),
+        'has_drop_moment': torch.zeros(B, dtype=torch.float32, device=device),
+        'final_reward': torch.zeros(B, dtype=torch.float32, device=device),
     }
 
     # ---------- Fallback scoring function ----------
@@ -1164,6 +1172,7 @@ def mix_rewards(
                 print(f"Unknown component type {typ}, ignoring")
 
         final_reward[i] = r
+        metrics_dict['final_reward'][i] = r
 
     return final_reward, metrics_dict
 

@@ -11,7 +11,7 @@ into a LightRFT prompt dataset schema:
         "prompt": "...",
         "images": ["/abs/path/to/image.png"],
         "reference": "...",
-        "label": "math_prm"
+        "label": "math_psgrpo"
     }
 
 It also performs a lightweight `PromptDatasetVL` smoke validation on the
@@ -42,8 +42,8 @@ from lightrft.datasets.prompts_dataset_vl import PromptDatasetVL
 
 DEFAULT_INPUT_PATH = "/home/ubuntu/URSA-MATH/datasets/URSA-MATH/MMathCoT-1M/train.jsonl"
 DEFAULT_IMAGE_ROOT = "/home/ubuntu/URSA-MATH/datasets/URSA-MATH/images"
-DEFAULT_OUTPUT_PATH = str(REPO_ROOT / "tmp" / "ursa_stage3" / "mmathcot_stage3_math_prm.jsonl")
-DEFAULT_SUMMARY_PATH = str(REPO_ROOT / "tmp" / "ursa_stage3" / "mmathcot_stage3_math_prm.summary.json")
+DEFAULT_OUTPUT_PATH = str(REPO_ROOT / "tmp" / "ursa_stage3" / "mmathcot_stage3_math_psgrpo.jsonl")
+DEFAULT_SUMMARY_PATH = str(REPO_ROOT / "tmp" / "ursa_stage3" / "mmathcot_stage3_math_psgrpo.summary.json")
 
 
 def parse_args() -> argparse.Namespace:
@@ -80,7 +80,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--label",
         type=str,
-        default="math_prm",
+        default="math_psgrpo",
         help="Label written into the converted manifest.",
     )
     parser.add_argument(

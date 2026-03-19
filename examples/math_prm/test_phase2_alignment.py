@@ -125,6 +125,33 @@ class FakeRewardModel(torch.nn.Module):
         return SimpleNamespace(logits=logits)
 
 
+class FakeMultiStepProcessor(FakeProcessor):
+    def __call__(self, text, images, return_tensors="pt"):
+        self.calls.append({"text": text, "images": images, "return_tensors": return_tensors})
+        return FakeBatch(
+            {
+                "input_ids": torch.tensor([[11, 42, 13, 42, 14, 42]], dtype=torch.long),
+                "attention_mask": torch.tensor([[1, 1, 1, 1, 1, 1]], dtype=torch.long),
+            }
+        )
+
+
+class FakeMultiStepRewardModel(torch.nn.Module):
+    def __init__(self, step_scores):
+        super().__init__()
+        self.anchor = torch.nn.Parameter(torch.zeros(1))
+        self.step_scores = torch.tensor(step_scores, dtype=torch.float32)
+
+    def forward(self, **inputs):
+        input_ids = inputs["input_ids"].view(-1)
+        seq_len = input_ids.shape[0] + MathPRMReward._IMAGE_PAD
+        logits = torch.zeros((1, seq_len, 1), dtype=torch.float32, device=input_ids.device)
+        step_positions = [MathPRMReward._IMAGE_PAD + 1, MathPRMReward._IMAGE_PAD + 3, MathPRMReward._IMAGE_PAD + 5]
+        for position, score in zip(step_positions, self.step_scores):
+            logits[0, position, 0] = torch.logit(score, eps=1e-6)
+        return SimpleNamespace(logits=logits)
+
+
 class FakeStrategy:
     def __init__(self):
         self.args = SimpleNamespace(text_only=False)
@@ -248,13 +275,32 @@ class Phase2AlignmentTests(unittest.TestCase):
             raw_images=[sample_image],
         )
 
-        self.assertEqual(tuple(scores.shape), (1,))
+        self.assertTrue(isinstance(scores, torch.Tensor) or isinstance(scores, dict))
+        if isinstance(scores, dict):
+            self.assertEqual(tuple(scores["score"].shape), (1,))
+        else:
+            self.assertEqual(tuple(scores.shape), (1,))
         self.assertEqual(processor.calls[0]["images"], [sample_image])
         user_content = processor.chat_templates[0]["conv"][1]["content"]
         self.assertTrue(user_content.startswith("<|image|>You are given a problem and a step-by-step solution."))
         self.assertIn("How many stages are shown?", user_content)
         self.assertNotIn("<|vision_start|>", user_content)
         self.assertNotIn("<|image|><|vision_start|>", user_content)
+
+    def test_math_prm_forward_keeps_legacy_tensor_output_without_phase4_args(self):
+        processor = FakeProcessor()
+        model = FakeRewardModel()
+        reward = MathPRMReward(model, processor, aggregation="min")
+
+        score = reward(
+            sequences=None,
+            attention_mask=None,
+            prompt_and_output=["<|im_start|>assistant\nStep 1: Count.\n†Answer: 3"],
+            raw_images=[None],
+        )
+
+        self.assertIsInstance(score, torch.Tensor)
+        self.assertEqual(tuple(score.shape), (1,))
 
     def test_load_reward_models_uses_direct_ursa_loader_for_math_prm(self):
         import reward_models_utils as rm_utils
@@ -343,6 +389,22 @@ class Phase2AlignmentTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["model_reward"].item(), 0.75, places=6)
         self.assertAlmostEqual(metrics["rule_reward"].item(), 0.0, places=6)
         self.assertAlmostEqual(metrics["format_reward"].item(), 1.0, places=6)
+        self.assertAlmostEqual(metrics["final_reward"].item(), 0.75, places=6)
+
+    def test_mix_rewards_supports_phase4_math_psgrpo_label(self):
+        labels = ["math_psgrpo"]
+        model_scores = torch.tensor([[1.0]], dtype=torch.float32)
+        label_map = {"math_prm": 0}
+        solutions = ["Step 1: Compute carefully.\n†Answer: 37"]
+        refs = ["37"]
+
+        with mock.patch("torch.distributed.get_rank", return_value=0):
+            reward, metrics = mix_rewards(labels, model_scores, label_map, solutions, refs)
+
+        self.assertAlmostEqual(reward.item(), 1.0, places=6)
+        self.assertAlmostEqual(metrics["model_reward"].item(), 1.0, places=6)
+        self.assertAlmostEqual(metrics["final_reward"].item(), 1.0, places=6)
+        self.assertAlmostEqual(metrics["format_reward"].item(), 1.0, places=6)
 
     def test_mix_rewards_still_applies_global_format_reward_for_non_math_labels(self):
         labels = ["general"]
@@ -388,6 +450,68 @@ class Phase2AlignmentTests(unittest.TestCase):
         self.assertTrue(should_stop_math_prm_response_text("Step 1: Inspect.\n†Answer: yes"))
         self.assertTrue(should_stop_math_prm_response_text("Step 1: Compute.\n†Answer: 37"))
         self.assertFalse(should_stop_math_prm_response_text("Step 1: Compute carefully."))
+
+    def test_math_prm_psgrpo_metrics_reward_mapping_matches_phase4(self):
+        reward = _minimal_math_prm_instance()
+
+        correct_no_drop = reward._compute_psgrpo_metrics(
+            response="Step 1: Compute.\n†Answer: 37",
+            reference="37",
+            step_scores=torch.tensor([0.92, 0.88, 0.84], dtype=torch.float32),
+        )
+        self.assertAlmostEqual(correct_no_drop["outcome_correct"], 1.0, places=6)
+        self.assertAlmostEqual(correct_no_drop["has_drop_moment"], 0.0, places=6)
+        self.assertAlmostEqual(correct_no_drop["final_reward"], 1.0, places=6)
+
+        correct_with_drop = reward._compute_psgrpo_metrics(
+            response="Step 1: Compute.\n†Answer: 37",
+            reference="37",
+            step_scores=torch.tensor([0.90, 0.50, 0.48], dtype=torch.float32),
+        )
+        self.assertAlmostEqual(correct_with_drop["outcome_correct"], 1.0, places=6)
+        self.assertAlmostEqual(correct_with_drop["has_drop_moment"], 1.0, places=6)
+        self.assertGreater(correct_with_drop["max_relative_drop"], 0.3)
+        self.assertAlmostEqual(correct_with_drop["final_reward"], 0.5, places=6)
+
+        incorrect = reward._compute_psgrpo_metrics(
+            response="Step 1: Compute.\n†Answer: 41",
+            reference="37",
+            step_scores=torch.tensor([0.90, 0.85, 0.82], dtype=torch.float32),
+        )
+        self.assertAlmostEqual(incorrect["outcome_correct"], 0.0, places=6)
+        self.assertAlmostEqual(incorrect["final_reward"], 0.0, places=6)
+
+    def test_math_prm_forward_returns_phase4_psgrpo_metrics(self):
+        processor = FakeMultiStepProcessor()
+        model = FakeMultiStepRewardModel([0.90, 0.50, 0.48])
+        reward = MathPRMReward(model, processor, aggregation="min")
+
+        sample = (
+            "<|im_start|>user\nSolve for y when x = 6 in y = 5x + 7.<|im_end|>"
+            "<|im_start|>assistant\n"
+            "Step 1: Substitute x = 6.\n"
+            "Step 2: Compute 5 * 6 = 30.\n"
+            "Step 3: Add 7 to get 37.\n"
+            "†Answer: 37"
+        )
+
+        result = reward(
+            sequences=None,
+            attention_mask=None,
+            prompt_and_output=[sample],
+            raw_images=[object()],
+            references=["37"],
+            labels=["math_psgrpo"],
+        )
+
+        self.assertIsInstance(result, dict)
+        self.assertAlmostEqual(result["score"].item(), 0.5, places=6)
+        self.assertAlmostEqual(result["model_reward"].item(), 0.48, places=4)
+        self.assertAlmostEqual(result["outcome_correct"].item(), 1.0, places=6)
+        self.assertAlmostEqual(result["has_drop_moment"].item(), 1.0, places=6)
+        self.assertGreater(result["max_relative_drop"].item(), 0.3)
+        self.assertAlmostEqual(result["final_reward"].item(), 0.5, places=6)
+        self.assertAlmostEqual(result["step_count"].item(), 3.0, places=6)
 
     def test_actor_vl_casts_multimodal_tensors_to_model_dtype(self):
         fake_model = FakeVisionLanguageModel()

@@ -1,6 +1,7 @@
 import os
 import sys
 import os.path
+from collections import defaultdict
 from abc import ABC
 from typing import Any, Callable, Dict, List, Optional
 
@@ -401,8 +402,7 @@ class PPOTrainerVL(ABC):
                 rollout_status = {}
                 if self.replay_buffer.items:
                     all_rewards = []
-                    all_format_rewards = []
-                    all_accuracy_rewards = []
+                    reward_metric_values = defaultdict(list)
                     all_response_lengths = []
 
                     for item in self.replay_buffer.items:
@@ -418,14 +418,9 @@ class PPOTrainerVL(ABC):
                             hasattr(item, 'info') and item.info is not None and 'reward_metrics' in item.info
                             and item.info['reward_metrics'] is not None
                         ):
-
                             reward_metrics = item.info['reward_metrics']
-
-                            # Safely extract sub-metrics
-                            if 'format_reward' in reward_metrics:
-                                all_format_rewards.append(reward_metrics['format_reward'])
-                            if 'accuracy_reward' in reward_metrics:
-                                all_accuracy_rewards.append(reward_metrics['accuracy_reward'])
+                            for key, value in reward_metrics.items():
+                                reward_metric_values[key].append(value)
 
                         # Collect response lengths from rollout
                         if hasattr(item, 'info') and item.info is not None and 'response_length' in item.info:
@@ -443,36 +438,18 @@ class PPOTrainerVL(ABC):
                         rollout_status["rollout_reward"] = rewards_tensor.mean().item()
                         rollout_status["rollout_reward_std"] = rewards_tensor.std().item()
 
-                    if all_format_rewards:
-                        # [TENSOR-FIX] Handle both tensor lists and scalar lists
-                        # Issue: all_format_rewards may contain tensors (from reward_metrics),
-                        # but torch.tensor() cannot convert a list of tensors directly.
-                        # Solution: Use torch.cat() for tensor lists, torch.tensor() for scalar lists
-                        if isinstance(all_format_rewards[0], torch.Tensor):
-                            # List of tensors: concatenate them
-                            format_tensor = torch.cat([t.to(device).float() for t in all_format_rewards])
+                    for metric_name, values in reward_metric_values.items():
+                        if not values:
+                            continue
+                        if isinstance(values[0], torch.Tensor):
+                            metric_tensor = torch.cat([t.to(device).float() for t in values])
                         else:
-                            # List of scalars: convert to tensor
-                            format_tensor = torch.tensor(all_format_rewards, dtype=torch.float32, device=device)
-
-                        mean_format_reward = format_tensor.mean().item()
-
-                        # Only display if mean is significantly non-zero
-                        if abs(mean_format_reward) > 1e-6:
-                            rollout_status["rollout_format_reward"] = mean_format_reward
-
-                    if all_accuracy_rewards:
-                        # [TENSOR-FIX] Handle both tensor lists and scalar lists
-                        if isinstance(all_accuracy_rewards[0], torch.Tensor):
-                            accuracy_tensor = torch.cat([t.to(device).float() for t in all_accuracy_rewards])
-                        else:
-                            accuracy_tensor = torch.tensor(all_accuracy_rewards, dtype=torch.float32, device=device)
-
-                        mean_accuracy_reward = accuracy_tensor.mean().item()
-
-                        # Only display if mean is significantly non-zero
-                        if abs(mean_accuracy_reward) > 1e-6:
-                            rollout_status["rollout_accuracy_reward"] = mean_accuracy_reward
+                            metric_tensor = torch.tensor(values, dtype=torch.float32, device=device)
+                        if metric_tensor.numel() == 0:
+                            continue
+                        mean_metric = metric_tensor.mean().item()
+                        if abs(mean_metric) > 1e-6:
+                            rollout_status[f"rollout_{metric_name}"] = mean_metric
 
                     if all_response_lengths:
                         # [TENSOR-FIX] Handle both tensor lists and scalar lists
@@ -1179,8 +1156,7 @@ class PPOTrainerVL(ABC):
             self.critic.eval()
 
         all_rewards = []
-        all_format_rewards = []
-        all_accuracy_rewards = []
+        reward_metric_values = defaultdict(list)
         all_response_lengths = []
         num_eval_batches = 0
 
@@ -1226,10 +1202,8 @@ class PPOTrainerVL(ABC):
 
                         if 'reward_metrics' in info:
                             rm = info['reward_metrics']
-                            if 'format_reward' in rm:
-                                all_format_rewards.extend(extract_values(rm['format_reward']))
-                            if 'accuracy_reward' in rm:
-                                all_accuracy_rewards.extend(extract_values(rm['accuracy_reward']))
+                            for key, value in rm.items():
+                                reward_metric_values[key].extend(extract_values(value))
 
                 num_eval_batches += 1
                 if num_eval_batches >= len(eval_dataloader):
@@ -1250,8 +1224,8 @@ class PPOTrainerVL(ABC):
             # metrics[f"{name}_std"] = t.std().item() # Optional
 
         compute_stats("reward", all_rewards)
-        compute_stats("format_reward", all_format_rewards)
-        compute_stats("accuracy_reward", all_accuracy_rewards)
+        for metric_name, values in reward_metric_values.items():
+            compute_stats(metric_name, values)
         compute_stats("response_length", all_response_lengths)
 
         metrics["num_samples"] = len(all_rewards)

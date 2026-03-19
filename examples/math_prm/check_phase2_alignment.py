@@ -162,24 +162,32 @@ def main():
         )
 
         prompt_and_output = build_prompt_and_output(args.question, args.response)
-        min_reward = MathPRMReward(model, processor, aggregation="min")(
+        min_reward_output = MathPRMReward(model, processor, aggregation="min")(
             sequences=None,
             attention_mask=None,
             prompt_and_output=[prompt_and_output],
             raw_images=[image],
-        )[0].item()
-        avg_reward = MathPRMReward(model, processor, aggregation="avg")(
+        )
+        avg_reward_output = MathPRMReward(model, processor, aggregation="avg")(
             sequences=None,
             attention_mask=None,
             prompt_and_output=[prompt_and_output],
             raw_images=[image],
-        )[0].item()
-        last_reward = MathPRMReward(model, processor, aggregation="last")(
+        )
+        last_reward_output = MathPRMReward(model, processor, aggregation="last")(
             sequences=None,
             attention_mask=None,
             prompt_and_output=[prompt_and_output],
             raw_images=[image],
-        )[0].item()
+        )
+
+        def _scalar_reward(output):
+            score = output["score"] if isinstance(output, dict) else output
+            return score[0].item()
+
+        min_reward = _scalar_reward(min_reward_output)
+        avg_reward = _scalar_reward(avg_reward_output)
+        last_reward = _scalar_reward(last_reward_output)
 
     result = {
         "prepared_input_match": prepared_input_reference == prepared_input_lightrft,

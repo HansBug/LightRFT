@@ -17,7 +17,7 @@ Dependencies:
 """
 from __future__ import annotations
 
-from typing import Any, Optional, List, Tuple
+from typing import Any, Optional, List, Tuple, Dict
 import re
 import json
 import math
@@ -32,6 +32,7 @@ from itertools import zip_longest
 from lightrft.utils import Timer, get_current_device
 from lightrft.strategy.utils.distributed_util import gather_inputs_object_for_inference
 from lightrft.strategy import StrategyBase, is_engine
+from lightrft.evaluation.math_eval_utils import compare_answers, extract_answer, normalize_answer
 
 
 # ============================================================================
@@ -2185,6 +2186,8 @@ class MathPRMReward(nn.Module):
     # image is processed (576 patches - 1 original placeholder = 575 extras).
     # Source: prm_infer_score.py lines 118-119.
     _IMAGE_PAD = 575
+    _DROP_THRESHOLD = 0.3
+    _DROP_GAMMA = 0.5
 
     def __init__(
         self,
@@ -2345,6 +2348,72 @@ class MathPRMReward(nn.Module):
             return [None]
         return [raw_image] if raw_image is not None else [None]
 
+    @staticmethod
+    def _safe_text(value: Any) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    @staticmethod
+    def _is_multiple_choice_reference(reference: str) -> bool:
+        ref = normalize_answer(reference).strip().upper()
+        return len(ref) == 1 and ref in {"A", "B", "C", "D"}
+
+    @classmethod
+    def _extract_final_answer(cls, response: str) -> str:
+        response = cls._safe_text(response)
+        if not response:
+            return ""
+
+        if "†Answer:" in response:
+            answer_block = response.split("†Answer:", 1)[-1]
+            for line in answer_block.splitlines():
+                line = line.strip()
+                if line:
+                    return line
+
+        return extract_answer(response)
+
+    @classmethod
+    def _compute_relative_drop(cls, step_scores: torch.Tensor) -> Tuple[float, bool]:
+        if step_scores.numel() < 2:
+            return 0.0, False
+
+        scores = step_scores.detach().float()
+        prev_scores = scores[:-1]
+        next_scores = scores[1:]
+        denom = torch.clamp(prev_scores, min=1e-6)
+        relative_drops = torch.clamp((prev_scores - next_scores) / denom, min=0.0)
+        max_relative_drop = float(relative_drops.max().item()) if relative_drops.numel() else 0.0
+        return max_relative_drop, max_relative_drop >= cls._DROP_THRESHOLD
+
+    @classmethod
+    def _compute_psgrpo_metrics(
+        cls,
+        response: str,
+        reference: Any,
+        step_scores: torch.Tensor,
+    ) -> Dict[str, float]:
+        reference_text = cls._safe_text(reference)
+        predicted_answer = cls._extract_final_answer(response)
+        is_multiple_choice = cls._is_multiple_choice_reference(reference_text)
+        outcome_correct = float(
+            compare_answers(predicted_answer, reference_text, is_multiple_choice=is_multiple_choice)
+        )
+        max_relative_drop, has_drop_moment = cls._compute_relative_drop(step_scores)
+
+        final_reward = 0.0
+        if outcome_correct > 0.0:
+            final_reward = 1.0 - cls._DROP_GAMMA if has_drop_moment else 1.0
+
+        return {
+            "outcome_correct": outcome_correct,
+            "accuracy_reward": outcome_correct,
+            "max_relative_drop": max_relative_drop,
+            "has_drop_moment": float(has_drop_moment),
+            "final_reward": final_reward,
+        }
+
     # ------------------------------------------------------------------
     # Forward  (replicates single_inference() from prm_infer_score.py)
     # ------------------------------------------------------------------
@@ -2356,8 +2425,10 @@ class MathPRMReward(nn.Module):
         attention_mask,
         prompt_and_output=None,
         raw_images=None,
+        references=None,
+        labels=None,
         **kwargs,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | Dict[str, torch.Tensor]:
         """
         Score each sequence using URSA-MATH's step-level PRM protocol.
 
@@ -2392,10 +2463,28 @@ class MathPRMReward(nn.Module):
         elif prompt_and_output is None:
             raise ValueError("Either sequences or prompt_and_output must be provided")
 
-        batch_rewards: List[float] = []
-        image_inputs = raw_images or [None] * len(prompt_and_output)
+        return_dict = bool(kwargs.get("return_dict", False))
 
-        for text, sample_image in zip_longest(prompt_and_output, image_inputs, fillvalue=None):
+        batch_rewards: List[float] = []
+        batch_metrics: Dict[str, List[float]] = {
+            "model_reward": [],
+            "step_score_min": [],
+            "step_score_mean": [],
+            "step_score_last": [],
+            "step_count": [],
+            "accuracy_reward": [],
+            "outcome_correct": [],
+            "max_relative_drop": [],
+            "has_drop_moment": [],
+            "final_reward": [],
+        }
+        image_inputs = raw_images or [None] * len(prompt_and_output)
+        ref_inputs = references or [None] * len(prompt_and_output)
+        label_inputs = labels or ["math_prm"] * len(prompt_and_output)
+
+        for text, sample_image, reference, label in zip_longest(
+            prompt_and_output, image_inputs, ref_inputs, label_inputs, fillvalue=None
+        ):
             if text is None:
                 continue
             question, response = self._split_conversation(text)
@@ -2450,18 +2539,52 @@ class MathPRMReward(nn.Module):
 
             if step_scores.numel() == 0:
                 # No ' и' markers found – response was not in the expected format.
-                batch_rewards.append(0.0)
+                sequence_reward = 0.0
+                psgrpo_metrics = self._compute_psgrpo_metrics(response, reference, step_scores)
+                if label == "math_psgrpo":
+                    sequence_reward = psgrpo_metrics["final_reward"]
+
+                batch_rewards.append(sequence_reward)
+                batch_metrics["model_reward"].append(0.0)
+                batch_metrics["step_score_min"].append(0.0)
+                batch_metrics["step_score_mean"].append(0.0)
+                batch_metrics["step_score_last"].append(0.0)
+                batch_metrics["step_count"].append(0.0)
+                for key in ("accuracy_reward", "outcome_correct", "max_relative_drop",
+                            "has_drop_moment", "final_reward"):
+                    batch_metrics[key].append(psgrpo_metrics[key] if label == "math_psgrpo" else 0.0)
                 continue
 
             # Aggregate step scores.
             # Source: prm_infer_score.py lines 122-123 (return_score function).
             if self.aggregation in ('min',):
-                batch_rewards.append(float(torch.min(step_scores).item()))
+                aggregated_score = float(torch.min(step_scores).item())
             elif self.aggregation in ('avg', 'mean'):
-                batch_rewards.append(float(torch.mean(step_scores).item()))
+                aggregated_score = float(torch.mean(step_scores).item())
             elif self.aggregation == 'last':
-                batch_rewards.append(float(step_scores[-1].item()))
+                aggregated_score = float(step_scores[-1].item())
             else:
                 raise ValueError(f"Unknown aggregation: {self.aggregation!r}")
 
-        return torch.tensor(batch_rewards, dtype=torch.float32, device=device)
+            psgrpo_metrics = self._compute_psgrpo_metrics(response, reference, step_scores)
+            sequence_reward = psgrpo_metrics["final_reward"] if label == "math_psgrpo" else aggregated_score
+
+            batch_rewards.append(sequence_reward)
+            batch_metrics["model_reward"].append(aggregated_score)
+            batch_metrics["step_score_min"].append(float(torch.min(step_scores).item()))
+            batch_metrics["step_score_mean"].append(float(torch.mean(step_scores).item()))
+            batch_metrics["step_score_last"].append(float(step_scores[-1].item()))
+            batch_metrics["step_count"].append(float(step_scores.numel()))
+            for key in ("accuracy_reward", "outcome_correct", "max_relative_drop",
+                        "has_drop_moment", "final_reward"):
+                batch_metrics[key].append(psgrpo_metrics[key] if label == "math_psgrpo" else 0.0)
+
+        score_tensor = torch.tensor(batch_rewards, dtype=torch.float32, device=device)
+        if references is None and labels is None and not return_dict:
+            return score_tensor
+
+        metrics_tensor = {
+            key: torch.tensor(values, dtype=torch.float32, device=device)
+            for key, values in batch_metrics.items()
+        }
+        return {"score": score_tensor, **metrics_tensor}

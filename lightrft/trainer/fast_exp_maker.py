@@ -138,6 +138,14 @@ class _SamplesOutput:
     prompt_and_output: Optional[List[str]] = None
 
 
+@dataclass
+class _RewardBatchResult:
+    """Reward scores and optional auxiliary metrics for one micro-batch."""
+
+    scores: torch.Tensor
+    metrics: Optional[Dict[str, torch.Tensor]] = None
+
+
 # ============================================================================
 # Helper Classes
 # ============================================================================
@@ -581,7 +589,7 @@ class RewardComputationEngine:
                 self.strategy.reload_model(rm)
 
         # Compute rewards for each RM
-        # all_rewards_list[rm_idx][micro_batch_idx] = Tensor(batch_size,)
+        # all_rewards_list[rm_idx][micro_batch_idx] = _RewardBatchResult(batch_size,)
         all_rewards_list = []
 
         for rm_idx, rm in enumerate(rm_list):
@@ -602,7 +610,7 @@ class RewardComputationEngine:
         outputs: List[_SamplesOutput],
         vlm_mode: bool,
         device: torch.device,
-    ) -> List[torch.Tensor]:
+    ) -> List[_RewardBatchResult]:
         """
         Compute rewards for a single reward model across all micro-batches.
 
@@ -616,8 +624,8 @@ class RewardComputationEngine:
         :type vlm_mode: bool
         :param device: Target device
         :type device: torch.device
-        :return: List of reward tensors, one per micro-batch
-        :rtype: List[torch.Tensor]
+        :return: List of reward results, one per micro-batch
+        :rtype: List[_RewardBatchResult]
         """
         # Check if this is a custom engine model (non-torch base_model)
         is_custom_engine = (
@@ -640,7 +648,7 @@ class RewardComputationEngine:
         rm_idx: int,
         outputs: List[_SamplesOutput],
         device: torch.device,
-    ) -> List[torch.Tensor]:
+    ) -> List[_RewardBatchResult]:
         """
         Compute rewards using optimized filtering (only process relevant samples).
 
@@ -655,8 +663,8 @@ class RewardComputationEngine:
         :type outputs: List[_SamplesOutput]
         :param device: Target device
         :type device: torch.device
-        :return: List of reward tensors per micro-batch
-        :rtype: List[torch.Tensor]
+        :return: List of reward results per micro-batch
+        :rtype: List[_RewardBatchResult]
         """
         # Get RM key from inverse label map
         rm_key = self.inv_label_map.get(rm_idx)
@@ -695,7 +703,13 @@ class RewardComputationEngine:
         # ========== Process Stage: Compute or skip ==========
         if not needed_positions:
             # No samples need this RM, return zeros for all micro-batches
-            return [torch.zeros(len(output.labels), dtype=torch.float32, device=device) for output in outputs]
+            return [
+                _RewardBatchResult(
+                    scores=torch.zeros(len(output.labels), dtype=torch.float32, device=device),
+                    metrics=None,
+                )
+                for output in outputs
+            ]
 
         # Run single forward pass on filtered samples
         rm_output = rm(
@@ -717,14 +731,14 @@ class RewardComputationEngine:
         for (mb_idx, samp_idx), score in zip(needed_positions, filtered_scores):
             micro_batch_rewards[mb_idx][samp_idx] = score
 
-        return micro_batch_rewards
+        return [_RewardBatchResult(scores=rewards, metrics=None) for rewards in micro_batch_rewards]
 
     def _compute_batched_custom_engine_rewards(
         self,
         rm,
         outputs: List[_SamplesOutput],
         device: torch.device,  # noqa: ARG002 (unused but kept for API consistency)
-    ) -> List[torch.Tensor]:
+    ) -> List[_RewardBatchResult]:
         """
         Compute rewards using custom engine with full batch processing (legacy path).
 
@@ -734,8 +748,8 @@ class RewardComputationEngine:
         :type outputs: List[_SamplesOutput]
         :param device: Target device (unused but kept for API consistency)
         :type device: torch.device
-        :return: List of reward tensors per micro-batch
-        :rtype: List[torch.Tensor]
+        :return: List of reward results per micro-batch
+        :rtype: List[_RewardBatchResult]
         """
         # Flatten all micro-batches into single batch
         flat_data = {
@@ -767,7 +781,34 @@ class RewardComputationEngine:
 
         # Split back into micro-batches
         batch_sizes = [len(output.prompt_and_output) for output in outputs]
-        return list(all_scores.split(batch_sizes))
+        return [
+            _RewardBatchResult(scores=scores.to(device=device, dtype=torch.float32), metrics=None)
+            for scores in all_scores.split(batch_sizes)
+        ]
+
+    @staticmethod
+    def _normalize_reward_metrics(
+        rm_output: Dict[str, torch.Tensor],
+        batch_size: int,
+        device: torch.device,
+    ) -> Optional[Dict[str, torch.Tensor]]:
+        metrics: Dict[str, torch.Tensor] = {}
+        for key, value in rm_output.items():
+            if key == "score":
+                continue
+            if not isinstance(value, torch.Tensor):
+                if isinstance(value, (int, float, bool)):
+                    value = torch.tensor(value, dtype=torch.float32)
+                else:
+                    continue
+            metric = value.to(device=device)
+            if metric.ndim == 0:
+                metric = metric.repeat(batch_size)
+            metric = metric.reshape(-1).float()
+            if metric.numel() != batch_size:
+                continue
+            metrics[key] = metric
+        return metrics or None
 
     def _compute_standard_torch_rewards(
         self,
@@ -775,7 +816,7 @@ class RewardComputationEngine:
         outputs: List[_SamplesOutput],
         vlm_mode: bool,  # noqa: ARG002 (kept for future VLM-specific logic)
         device: torch.device,
-    ) -> List[torch.Tensor]:
+    ) -> List[_RewardBatchResult]:
         """
         Compute rewards using standard PyTorch reward model.
 
@@ -789,10 +830,10 @@ class RewardComputationEngine:
         :type vlm_mode: bool
         :param device: Target device
         :type device: torch.device
-        :return: List of reward tensors per micro-batch
-        :rtype: List[torch.Tensor]
+        :return: List of reward results per micro-batch
+        :rtype: List[_RewardBatchResult]
         """
-        micro_batch_rewards = []
+        micro_batch_rewards: List[_RewardBatchResult] = []
 
         for output in outputs:
             # Unpack sequences if needed
@@ -808,18 +849,25 @@ class RewardComputationEngine:
                 prompt_and_output=output.prompt_and_output,
                 raw_images=output.raw_images,
                 img_num=output.image_num,
+                references=output.references,
+                labels=output.labels,
                 **output.inputs_extra_kwargs,
             )
 
-            score = rm_output["score"] if isinstance(rm_output, dict) else rm_output
-            micro_batch_rewards.append(torch.as_tensor(score, dtype=torch.float32, device=device))
+            if isinstance(rm_output, dict):
+                score = torch.as_tensor(rm_output["score"], dtype=torch.float32, device=device)
+                metrics = self._normalize_reward_metrics(rm_output, score.numel(), device)
+            else:
+                score = torch.as_tensor(rm_output, dtype=torch.float32, device=device)
+                metrics = None
+            micro_batch_rewards.append(_RewardBatchResult(scores=score, metrics=metrics))
 
         return micro_batch_rewards
 
     def _aggregate_rewards(
         self,
         outputs: List[_SamplesOutput],
-        all_rewards_list: List[List[torch.Tensor]],
+        all_rewards_list: List[List[_RewardBatchResult]],
         is_multi_rm: bool,
     ) -> None:
         """
@@ -827,8 +875,8 @@ class RewardComputationEngine:
 
         :param outputs: Sample outputs (modified in-place)
         :type outputs: List[_SamplesOutput]
-        :param all_rewards_list: Nested list [rm_idx][micro_batch_idx] -> Tensor
-        :type all_rewards_list: List[List[torch.Tensor]]
+        :param all_rewards_list: Nested list [rm_idx][micro_batch_idx] -> reward result
+        :type all_rewards_list: List[List[_RewardBatchResult]]
         :param is_multi_rm: Whether using multiple reward models
         :type is_multi_rm: bool
         """
@@ -837,7 +885,8 @@ class RewardComputationEngine:
 
         for mb_idx in range(num_micro_batches):
             # Collect rewards from all RMs for this micro-batch
-            same_batch_rewards = [all_rewards_list[rm_idx][mb_idx] for rm_idx in range(num_rms)]
+            same_batch_results = [all_rewards_list[rm_idx][mb_idx] for rm_idx in range(num_rms)]
+            same_batch_rewards = [result.scores for result in same_batch_results]
 
             if is_multi_rm:
                 # Use custom aggregation function
@@ -858,8 +907,8 @@ class RewardComputationEngine:
                 outputs[mb_idx].reward_metrics = reward_metrics
             else:
                 # Single RM, use score directly
-                outputs[mb_idx].rewards = same_batch_rewards[0]
-                outputs[mb_idx].reward_metrics = None
+                outputs[mb_idx].rewards = same_batch_results[0].scores
+                outputs[mb_idx].reward_metrics = same_batch_results[0].metrics
 
 
 # ============================================================================
