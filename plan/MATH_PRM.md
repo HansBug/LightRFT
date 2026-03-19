@@ -1151,6 +1151,7 @@ Checklist：
 - 训练链路、reward 链路、trajectory 保存和离线分析都已打通
 - 之前的格式稳定性问题已定位并修复，根因详见 `plan/PHASE7_FORMAT_STABILITY_ANALYSIS.md`
 - 当前仍有一个独立保留问题：本地 `hf` 多模态 rollout 速度明显偏慢，但已不再阻塞 bounded run 完成
+- 推理性能拆解详见 `plan/PHASE7_HF_ROLLOUT_PERFORMANCE_ANALYSIS.md`
 
 本轮最终观测配置：
 
