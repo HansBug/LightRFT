@@ -259,4 +259,160 @@ Step 4: Conclude the answer based on the lack of information. ...
 - 压掉重复 `†Answer:`
 - 进一步收敛 `StepStep 1:` 这类 header 漂移
 
+## 9. 与纯 URSA 推理的对比结论
+
+为了判断问题到底更像“URSA 模型本身”还是“LightRFT rollout 包装逻辑”，我又额外做了一轮对照排查。
+
+### 9.1 直接跑 `/home/ubuntu/URSA-MATH` 原仓库示例
+
+我尝试运行了：
+
+- `/home/ubuntu/URSA-MATH/examples/run_ursa_8b_torch_example.py`
+- `/home/ubuntu/URSA-MATH/examples/run_ursa_8b_torch_example_standalone.py`
+
+在当前环境里，这两条都没有直接跑通，都会报：
+
+```text
+ModuleNotFoundError: No module named 'attrdict'
+```
+
+这说明：
+
+- 原仓库文档里“已验证成功输出”的结果依赖它自己的原始环境
+- 在当前这套通用环境里，不能直接把 `/home/ubuntu/URSA-MATH` 原仓库示例当成“开箱即用基线”
+- 当前仓库里已经兼容过的 `examples/math_prm/ursa_model` 反而是更可直接复现的 URSA 运行时
+
+### 9.2 在当前仓库里直接用兼容版 `ursa_model` 做同一条样本推理
+
+我选用了和 `Phase 7` 完全相同的真实样本：
+
+- 图片：
+  - `/home/ubuntu/URSA-MATH/datasets/URSA-MATH/images/data_images/VQA2.0/images/156768.jpg`
+- 问题：
+  - `Is the landscape flat?`
+
+并在当前仓库里直接调用兼容版：
+
+- `/data/LightRFT/examples/math_prm/ursa_model`
+
+做了三种对照：
+
+1. `greedy_helpful`
+2. `greedy_stage3`
+3. `sample_stage3`
+
+结果：
+
+- 三种都能输出干净的 `Step ... / †Answer ...`
+- 没有出现 `7777...`
+- 没有出现第二个 `†Answer:`
+
+其中 `sample_stage3` 的典型输出是：
+
+```text
+Step 1: Observe the image. ...
+
+Step 2: Analyze the ground. ...
+
+Step 3: Determine the answer. ...
+
+†Answer: no
+```
+
+### 9.3 进一步把 `max_new_tokens` 拉到 `1024` 做多次采样
+
+为了排除“只是因为我前面设置得太保守”，我又在同一条真实样本上直接做了：
+
+- `do_sample=True`
+- `temperature=1.0`
+- `top_p=1.0`
+- `max_new_tokens=1024`
+
+连续采样 `4` 次。
+
+结果仍然是：
+
+- 所有输出都干净
+- 长度大约只有 `71 ~ 101` tokens
+- 没有任何一个 hitting `1024`
+- 没有 `7777...`
+- 没有第二个 `†Answer:`
+
+这说明：
+
+- 同一个模型
+- 同一个图片
+- 同一个问题
+- 同类 Stage 3 system prompt
+
+在**纯 `model.generate()`** 路径下，并不会自然复现 `Phase 7` 里那种长尾乱码。
+
+### 9.4 与当前 LightRFT rollout 路径再对照
+
+我还复跑了：
+
+- `/data/LightRFT/examples/math_prm/check_hf_rollout.py --max-new-tokens 1024`
+
+结论有两个：
+
+1. `rollout_outputs` 与 `direct actor.generate()` 逐 token 完全一致  
+   也就是说，这个脚本证明：
+   - 当前本地 HF rollout 路径没有“额外改写输出”
+   - rollout 和 actor.generate 在这条检查路径下是对齐的
+
+2. 但在这条检查路径下，又出现了明显异常  
+   例如 `vqa_flatness` 这条样本的输出只有：
+
+```text
+Step 1: Observe
+```
+
+这说明：
+
+- 当前 LightRFT 自定义的 structured stopping 逻辑，本身就存在“异常早停/异常截断”的风险
+
+### 9.5 代码级定位
+
+继续追代码后，我发现了一个很关键的问题：
+
+- `/data/LightRFT/lightrft/utils/math_prm_output.py`
+
+里当前的：
+
+```python
+MATH_PRM_STRUCTURED_LABELS = frozenset({"math_prm", "math_prm_combined"})
+```
+
+**并不包含 `math_psgrpo`。**
+
+而 `Phase 7` 跑的实际 label 恰恰是：
+
+- `math_psgrpo`
+
+这意味着：
+
+- `Phase 7` 真实训练里，`structured_answer_stop` 实际没有启用
+- 所以 Phase 7 中看到的长尾乱码，至少有一部分是因为 `math_psgrpo` 这条路径根本没吃到 stopping 保护
+
+与此同时，`check_hf_rollout.py` 又表明：
+
+- 当 structured stop 被强制打开时
+- 当前 `_StructuredAnswerEosLogitsProcessor + should_stop_math_prm_response_text(...)`
+- 又可能过早触发，造成过短输出
+
+### 9.6 当前最可信的判断
+
+基于这一轮对照，当前最可信的结论是：
+
+1. `URSA` 模型本身不是“天然就会输出 7777...`
+2. 当前 `Phase 7` 里的长尾和格式漂移，更像是 `LightRFT` 侧的 rollout / stopping 集成问题
+3. 具体至少有两层问题：
+   - `math_psgrpo` 没被纳入 `structured_answer_stop`
+   - 当前 structured stop 本身又可能过早截断
+
+所以接下来的“全面修复”，不应该只盯着模型本身，而应该优先修：
+
+- `math_psgrpo` 的 stopping 覆盖
+- structured stop 的触发条件与实现细节
+
 换句话说，下一步要解决的已经不是“能不能跑”，而是“跑出来的东西能不能稳定像样”。
