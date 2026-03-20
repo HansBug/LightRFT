@@ -42,12 +42,16 @@ from typing import Callable, Dict, List, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers import (
+    AutoConfig,
+    AutoModelForTokenClassification,
+    AutoModelForVision2Seq,
+)
 
 from lightrft.utils import add_arguments, ensure_video_input_available
 ensure_video_input_available()
 
 from lightrft.datasets import PromptDatasetVL, SFTDatasetVL
-from lightrft.models.utils import get_vlm_for_sequence_regression
 from lightrft.utils import blending_datasets, get_tokenizer_processor_vl
 from lightrft.models.actor_language import ActorLanguage
 from lightrft.models.actor_vl import ActorVL
@@ -57,6 +61,120 @@ from lightrft.trainer.spmd_ppo_trainer import SPMDPPOTrainerVL
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from reward_models_utils import load_reward_models, reward_fn, RECIPE
+
+
+def is_ursa_model(model_path: str) -> bool:
+    """
+    Check if the model is a URSA model by looking for URSA-specific config.
+
+    URSA models have:
+    - architectures: ["UrsaForConditionalGeneration"]
+    - model_type: "ursa"
+    - vision_config and aligner_config sections
+
+    Args:
+        model_path: Path to the model directory
+
+    Returns:
+        True if this is a URSA model, False otherwise
+    """
+    import os
+    config_path = os.path.join(model_path, "config.json")
+    if os.path.exists(config_path):
+        try:
+            import json
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+                # Check for UrsaForConditionalGeneration in architectures
+                architectures = config.get("architectures", [])
+                if "UrsaForConditionalGeneration" in architectures:
+                    return True
+                # Fallback: check model_type
+                if config.get("model_type") == "ursa":
+                    return True
+        except:
+            pass
+    return False
+
+
+def resolve_reference_shard_size(world_size: int, preferred_shard_size: int = 8) -> int:
+    """
+    Pick a reference-model FSDP shard size that preserves the original 8-way
+    layout when possible, but still works for bounded small-world-size runs.
+    """
+    if world_size <= 0:
+        return preferred_shard_size
+    candidate = min(preferred_shard_size, world_size)
+    while candidate > 1 and world_size % candidate != 0:
+        candidate -= 1
+    return candidate
+
+
+def load_actor_tokenizer_processor(
+    *,
+    model_path: str,
+    model,
+    strategy,
+    use_fast: bool,
+):
+    """
+    Load the actor tokenizer/processor, using the explicit URSA processor path
+    when the checkpoint is a URSA model.
+    """
+    if is_ursa_model(model_path):
+        from ursa_model import UrsaProcessor
+
+        processor = UrsaProcessor.from_pretrained(model_path)
+        tokenizer = processor.tokenizer
+        tokenizer.padding_side = "left"
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+            model.config.pad_token_id = tokenizer.pad_token_id
+        strategy.print(
+            f"Loaded URSA processor explicitly: tokenizer={type(tokenizer).__name__}, "
+            f"processor={type(processor).__name__}"
+        )
+        return tokenizer, processor
+
+    return get_tokenizer_processor_vl(
+        model_path,
+        model,
+        "left",
+        use_fast=use_fast,
+    )
+
+
+def prepare_ursa_runtime_for_inference_engines(strategy=None):
+    """
+    Register the local URSA classes with HuggingFace auto classes so rollout
+    engines that rely on ``AutoConfig`` can resolve ``model_type='ursa'``.
+    """
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    if current_dir not in sys.path:
+        sys.path.insert(0, current_dir)
+
+    pythonpath = os.environ.get("PYTHONPATH")
+    pythonpath_parts = pythonpath.split(os.pathsep) if pythonpath else []
+    if current_dir not in pythonpath_parts:
+        os.environ["PYTHONPATH"] = os.pathsep.join([current_dir, *pythonpath_parts]) if pythonpath_parts else current_dir
+    os.environ["LIGHTRFT_REGISTER_URSA_AUTO_CLASSES"] = "1"
+
+    from ursa_model import (
+        UrsaConfig,
+        UrsaForConditionalGeneration,
+        UrsaForTokenClassification,
+    )
+
+    AutoConfig.register("ursa", UrsaConfig, exist_ok=True)
+    AutoModelForVision2Seq.register(UrsaConfig, UrsaForConditionalGeneration, exist_ok=True)
+    AutoModelForTokenClassification.register(UrsaConfig, UrsaForTokenClassification, exist_ok=True)
+
+    if strategy is not None:
+        strategy.print(
+            "Registered URSA auto classes for inference engines "
+            f"(sys.path/PYTHONPATH include {current_dir})"
+        )
 
 
 def train(args):
@@ -80,7 +198,8 @@ def train(args):
         - meta_init: Initialize models on meta device to save CPU RAM
         - freeze_prefix: Freeze vision encoder during training
         - fsdp: Use FSDP instead of DeepSpeed
-        - rm_use_engine: Use SGLang engine for reward models
+        - rm_use_engine: Generic flag retained for other reward types, but
+          URSA math_prm/math_psgrpo PRM paths still load via HF directly
     """
     # configure strategy
     strategy = get_strategy(args)
@@ -96,8 +215,15 @@ def train(args):
     with strategy.init_model_context(meta_init=args.meta_init):
         strategy.print(f"Initializing models with meta_init={args.meta_init}")
 
-        # Select Actor class based on text_only flag
-        if args.text_only:
+        # Check if this is a URSA model
+        is_ursa = is_ursa_model(args.pretrain)
+
+        # Select Actor class based on model type and text_only flag
+        if is_ursa:
+            strategy.print(f"Detected URSA model, using UrsaActor")
+            from ursa_actor import UrsaActor
+            Actor = UrsaActor
+        elif args.text_only:
             Actor = ActorLanguage
         else:
             Actor = ActorVL
@@ -139,6 +265,13 @@ def train(args):
         strategy.print(f"Froze {frozen_params_count}/{total_params_count} parameters based on prefixes: {freeze_prefix}")
 
     if args.critic_pretrain:
+        try:
+            from lightrft.models import get_vlm_for_sequence_regression
+        except ImportError as exc:
+            raise ImportError(
+                "critic_pretrain was provided, but get_vlm_for_sequence_regression "
+                "is not available in this LightRFT checkout."
+            ) from exc
         critic = get_vlm_for_sequence_regression(
             args.critic_pretrain,
             "critic",
@@ -174,6 +307,7 @@ def train(args):
     if args.init_kl_coef == 0:
         initial_model = None
     else:
+        # Use the same Actor class (including URSA if detected)
         initial_model = Actor(
             args.pretrain,
             use_flash_attention_2=args.flash_attn,
@@ -185,10 +319,23 @@ def train(args):
         )
 
         if args.fsdp:
-            initial_model = strategy.prepare_model(initial_model, is_training=False, shard_size=8)
+            reference_shard_size = resolve_reference_shard_size(
+                world_size=strategy.world_size,
+                preferred_shard_size=8,
+            )
+            strategy.print(
+                "Preparing reference model with shard_size="
+                f"{reference_shard_size} (world_size={strategy.world_size})"
+            )
+            initial_model = strategy.prepare_model(
+                initial_model,
+                is_training=False,
+                shard_size=reference_shard_size,
+            )
             strategy.offload_model(initial_model)
 
     if args.enable_ema:
+        # Use the same Actor class (including URSA if detected)
         ema_model = Actor(
             args.pretrain,
             use_flash_attention_2=args.flash_attn,
@@ -200,8 +347,11 @@ def train(args):
         ema_model = None
 
     # configure tokenizer and processor
-    tokenizer, processor = get_tokenizer_processor_vl(
-        args.pretrain, actor.model, "left", strategy, use_fast=not strategy.args.disable_fast_tokenizer
+    tokenizer, processor = load_actor_tokenizer_processor(
+        model_path=args.pretrain,
+        model=actor.model,
+        strategy=strategy,
+        use_fast=not strategy.args.disable_fast_tokenizer,
     )
     assert processor is not None, "processor is None"
 
@@ -341,8 +491,17 @@ def train(args):
     os.makedirs(args.save_path, exist_ok=True)
     strategy.report_memory("after models init")
 
+    if is_ursa:
+        prepare_ursa_runtime_for_inference_engines(strategy)
+
     strategy.report_memory("before setup_inference_engine")
-    strategy.setup_inference_engine(args, engine_type=args.engine_type, actor=actor)
+    strategy.setup_inference_engine(
+        args,
+        engine_type=args.engine_type,
+        actor=actor,
+        tokenizer=tokenizer,
+        processor=processor,
+    )
     strategy.report_memory("after setup_inference_engine")
 
     # configure Trainer
@@ -383,6 +542,9 @@ def train(args):
         max_length=args.max_len,
         temperature=args.temperature,
         top_p=args.top_p,
+        top_k=args.top_k,
+        repetition_penalty=args.repetition_penalty,
+        no_repeat_ngram_size=args.no_repeat_ngram_size,
         pad_token_id=tokenizer.pad_token_id,
         eos_token_id=tokenizer.eos_token_id,
         # reward model
@@ -421,7 +583,7 @@ def train(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--engine_type", type=str, default="vllm", help="Choose inference engine type: vllm, sglang")
+    parser.add_argument("--engine_type", type=str, default="hf", help="Choose inference engine type: vllm, sglang, hf")
     parser.add_argument("--text_only", action="store_true", default=False)
 
     # Checkpoint
@@ -430,6 +592,12 @@ if __name__ == "__main__":
     parser.add_argument("--save_hf_ckpt", action="store_true", default=False)
     parser.add_argument("--disable_ds_ckpt", action="store_true", default=False)
     parser.add_argument("--save_trajectories", action="store_true", default=False, help="Save experience trajectories to JSON for debugging")
+    parser.add_argument(
+        "--trajectory_analysis",
+        action="store_true",
+        default=False,
+        help="Enable extra trajectory analysis metrics when saving trajectories",
+    )
     parser.add_argument("--num_trajectories_to_save", type=int, default=10, help="Number of trajectories to save per checkpoint")
     parser.add_argument("--print_replay_buffer_stats", action="store_true", default=False, help="Print detailed replay buffer statistics during training")
     parser.add_argument("--logging_steps", type=int, default=1)
@@ -450,8 +618,8 @@ if __name__ == "__main__":
     parser.add_argument("--rollout_batch_size", type=int, default=512)
     parser.add_argument("--micro_rollout_batch_size", type=int, default=8)
     parser.add_argument("--max_epochs", type=int, default=1)
-    parser.add_argument("--prompt_max_len", type=int, default=1024, help="Max tokens for each prompt")
-    parser.add_argument("--generate_max_len", type=int, default=1024, help="Max tokens to generate in PPO")
+    parser.add_argument("--prompt_max_len", type=int, default=6048, help="Max tokens for each prompt")
+    parser.add_argument("--generate_max_len", type=int, default=3072, help="Max tokens to generate in PPO")
     parser.add_argument("--max_len", type=int, default=None, help="deprecated max_len")
     parser.add_argument("--max_samples", type=int, default=1000000)
     parser.add_argument("--max_norm", type=float, default=1.0, help="Gradient clipping")
@@ -467,21 +635,24 @@ if __name__ == "__main__":
     parser.add_argument("--lambd", type=float, default=0.95, help="PPO GAE lambd")
     parser.add_argument("--gamma", type=float, default=1, help="PPO GAE gamma")
     parser.add_argument("--micro_train_batch_size", type=int, default=4, help="batch size per GPU")
-    parser.add_argument("--train_batch_size", type=int, default=128, help="Global training batch size")
+    parser.add_argument("--train_batch_size", type=int, default=512, help="Global training batch size")
     parser.add_argument("--normalize_reward_for_critic", action="store_true", default=False, help="Enable Reward Normalization in critic model")
     parser.add_argument("--top_p", type=float, default=1.0)
+    parser.add_argument("--top_k", type=int, default=-1)
     parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--repetition_penalty", type=float, default=1.0)
+    parser.add_argument("--no_repeat_ngram_size", type=int, default=0)
     parser.add_argument("--freeze_prefix", action="store_true", default=False, help="Freeze the prefix part (e.g. vision encoder) of the actor model")
     parser.add_argument("--freezing_actor_steps", type=int, default=-1, help="Used for critic initialization")
     parser.add_argument(
-        "--n_samples_per_prompt", type=int, default=1, help="number of responses for each prompt in generation"
+        "--n_samples_per_prompt", type=int, default=8, help="number of responses for each prompt in generation"
     )
     parser.add_argument("--save_value_network", action="store_true", default=False, help="Save critic model")
-    parser.add_argument("--actor_learning_rate", type=float, default=1e-6)
+    parser.add_argument("--actor_learning_rate", type=float, default=2e-6)
     parser.add_argument("--critic_learning_rate", type=float, default=9e-6)
     parser.add_argument("--lr_warmup_ratio", type=float, default=0.03)
     parser.add_argument("--kl_target", type=float, default=None)
-    parser.add_argument("--init_kl_coef", type=float, default=0.01, help="KL penalty in PPO")
+    parser.add_argument("--init_kl_coef", type=float, default=0.003, help="KL penalty in PPO")
     parser.add_argument(
         "--kl_estimator",
         type=str,
@@ -559,7 +730,7 @@ if __name__ == "__main__":
 
     # Evaluation dataset
     parser.add_argument("--eval_data", type=str, default=None, help="HF evaluation dataset name or path (default: use prompt_data)")
-    parser.add_argument("--eval_split", type=str, default="test", help="Evaluation data split (default: test)")
+    parser.add_argument("--eval_split", type=str, default="", help="Evaluation data split (default: disabled)")
     parser.add_argument("--max_eval_samples", type=int, default=500, help="Maximum number of samples to evaluate (default: 500)")
     
     parser.add_argument("--pretrain_data", type=str, default=None, help="HF dataset name or path")
@@ -571,7 +742,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--pretrain_split", type=str, default="train")
     parser.add_argument("--input_key", type=str, default="input", help="JSON dataset key")
-    parser.add_argument("--images_key", type=str, default="image", help="JSON dataser key for images")
+    parser.add_argument("--images_key", type=str, default="images", help="JSON dataset key for images")
     parser.add_argument("--reference_key", type=str, default="reference", help="JSON dataset key for reference answers")
     parser.add_argument("--label_key", type=str, default="label", help="JSON dataset key")
     parser.add_argument("--input_template", type=str, default=None)

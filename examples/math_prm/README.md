@@ -1,316 +1,261 @@
 <div align="center">
 
-# SafeWork-R1 Training Code
+# Math PRM Training in LightRFT
 
-Official training code implementation for SafeWork-R1 models using the SafeLadder framework.
-
-[🤗Huggingface Models](https://huggingface.co/collections/AI45Research/safework-r1) • [📜Technical Report](https://arxiv.org/abs/2507.18576) • [💬Online Chat](https://safework-r1.ai45.shlab.org.cn/)
+URSA-MATH Stage 3 reproduction workspace for LightRFT.
 
 </div>
 
-## Overview
+## Scope
 
-This repository contains the official training code for **SafeWork-R1**, a cutting-edge multimodal reasoning model that demonstrates the coevolution of safety and general intelligence under the AI-45° Law.
+This directory is no longer a generic multimodal reward example. It now only keeps the files that are still relevant to the URSA-MATH Stage 3 migration and reproduction path.
 
-The training implementation is built upon the **SafeLadder framework**, featuring:
-- **Multi-stage reinforcement learning** pipeline with progressive safety alignment
-- **Multi-principled verifiers** (Safety, Value, Knowledge) for robust reward signals
-- **Group Relative Policy Optimization (GRPO)** for efficient training
-- **Co-located reward models** for multi-dimensional evaluation
+Current target:
 
-## Key Features
+- actor: `URSA-8B`
+- reward model: `URSA-RM-8B`
+- reward labels: `math_prm`, `math_psgrpo`, `math_prm_combined`, `math_rule`
+- training loop: LightRFT PPO/GRPO stack with local `hf` rollout
+- raw dataset: `MMathCoT-1M`
 
-### Training Capabilities
+## Runtime Baseline
 
-- ✅ **Multi-Modal Support**: Both text-only and vision-language models (Qwen2.5-VL, InternVL3, DeepSeek-R1)
-- ✅ **Multiple Reward Models**: Value, Safety, Knowledge, Normal, and General verifiers
-- ✅ **Flexible Distributed Training**: DeepSpeed ZeRO (Stage 1/2/3) and PyTorch FSDP support
-- ✅ **Memory Optimization**: Meta device initialization, gradient checkpointing, CPU offloading
-- ✅ **Inference Engines**: vLLM and SGLang integration for efficient generation
-- ✅ **EMA Support**: Exponential Moving Average for model stability
-- ✅ **Advanced Techniques**: DAPO (Dynamic sampling and overlong buffer penalties)
+The runtime baseline is frozen by `/data/LightRFT/Dockerfile`.
 
-### SafeLadder Framework
+- Do not treat package-version changes as the first-line fix.
+- Prefer fixing code, schema conversion, prompt formatting, rollout configuration, and reward wiring first.
+- `vllm` / `sglang` support for URSA is tracked separately in the migration docs; the active Stage 3 path is the local `hf` rollout path.
 
-The training follows the SafeLadder multi-stage pipeline:
+## Directory Map
 
-1. **CoT-SFT**: Chain-of-Thought supervised fine-tuning
-2. **M³-RL**: Multi-principled Multi-model Multi-turn reinforcement learning
-3. **Safe-and-Efficient RL**: Safety-focused optimization with efficiency constraints
-4. **Deliberative Search RL**: Step-level verification with search mechanisms
-
-## Project Structure
-
+```text
+examples/math_prm/
+├── README.md                    # English guide for the current URSA-MATH Stage 3 layout
+├── README_zh.md                 # Chinese guide
+├── URSA_MIGRATION.md            # Temporary migration notes from the original URSA-MATH repo
+├── train_colocate.py            # Main LightRFT training entry
+├── run_grpo_math_prm_ursa_8b.sh # Main Stage 3 launcher
+├── ursa_actor.py                # URSA-specific actor wrapper
+├── reward_models.py             # Math-only URSA-RM reward implementation
+├── reward_models_utils.py       # Math-only reward loading, recipe, and reward aggregation
+├── sitecustomize.py             # Local runtime compatibility hook for this example stack
+├── tools/                       # Support scripts, regression checks, smoke runs, and observation tools
+│   ├── __init__.py
+│   ├── prepare_ursa_stage3_manifest.py
+│   ├── prepare_ursa_engine_checkpoint.py
+│   ├── prm_infer_score.py
+│   ├── check_phase2_alignment.py
+│   ├── check_hf_rollout.py
+│   ├── check_phase6_script_alignment.py
+│   ├── test_phase2_alignment.py
+│   ├── run_phase3_smoke.sh
+│   ├── run_phase7_observation.sh
+│   ├── analyze_phase7_observation.py
+│   └── probe_rollout_speed_candidates.py
+└── ursa_model/                  # Self-contained URSA model code used by actor and PRM loading
 ```
-safework_t1/
-├── train_colocate.py              # Main training script for GRPO with co-located RMs
-├── reward_models.py               # Reward model implementations (Value, Safety, Knowledge)
-├── reward_models_utils.py         # Utilities for loading and managing reward models
-├── test_reward_models.py          # Testing script for reward models
-├── run_grpo_kg_qwenvl.sh         # Training script for Knowledge + General RMs (Qwen2.5-VL)
-├── run_grpo_svki_fsdp_deepseek.sh # Training script for Safety + Value + Knowledge (DeepSeek-70B)
-└── run_grpo_svkng_fsdp_qwenvl.sh # Training script for all RMs (Qwen2.5-VL)
-```
 
-## Installation
+## What Each Top-Level File Does
 
-### Prerequisites
+### Core training path
 
-- Python >= 3.8
-- CUDA >= 11.8 (for GPU training)
-- 8x A100 (80GB) or equivalent GPUs recommended
+- `run_grpo_math_prm_ursa_8b.sh`
+  - Main launcher for Stage 3 reproduction.
+  - Wires actor path, reward path, dataset path, FSDP setup, rollout settings, and optional W&B.
+- `train_colocate.py`
+  - Real `torchrun` entry.
+  - Builds actor, reference model, reward model, dataset, trainer, and rollout engine.
+- `ursa_actor.py`
+  - URSA-specific actor wrapper used to load `UrsaForConditionalGeneration`.
 
-### Setup
+### Reward path
 
-1. **Clone the repository**:
+- `reward_models.py`
+  - Contains the active `MathPRMReward` implementation only.
+  - This file has been trimmed to the URSA-MATH Stage 3 path and no longer carries the old Qwen/SafeWork reward classes.
+- `reward_models_utils.py`
+  - Contains the active math-only reward loader and recipe logic.
+  - Handles `math_prm`, `math_psgrpo`, `math_prm_combined`, and `math_rule`.
+- `sitecustomize.py`
+  - Local import/runtime compatibility shim for the frozen example environment.
+
+### Self-contained URSA runtime
+
+- `ursa_model/`
+  - Local URSA config, processor, image processor, projector, vision towers, and model definitions.
+  - This is what lets the current LightRFT path run without importing runtime code directly from the external URSA-MATH repo.
+
+## What Lives Under `tools/`
+
+Everything under `tools/` is support infrastructure, not the main training entry.
+
+### Data and compatibility tools
+
+- `tools/prepare_ursa_stage3_manifest.py`
+  - Converts raw `MMathCoT-1M` Stage 3 jsonl into the LightRFT manifest schema.
+- `tools/prepare_ursa_engine_checkpoint.py`
+  - Builds a wrapper checkpoint for engine experiments when testing `vllm` / `sglang` loading.
+- `tools/prm_infer_score.py`
+  - Standalone PRM helper mirrored from URSA-MATH reference logic.
+
+### Regression and validation tools
+
+- `tools/check_phase2_alignment.py`
+  - Checks scorer parity against the URSA reference path.
+- `tools/check_hf_rollout.py`
+  - Minimal local `hf` rollout validation.
+- `tools/check_phase6_script_alignment.py`
+  - Static checker for current launcher defaults.
+- `tools/test_phase2_alignment.py`
+  - Regression tests for the active URSA-MATH Stage 3 path.
+
+### Smoke, observation, and profiling
+
+- `tools/run_phase3_smoke.sh`
+  - Time-boxed smoke launcher for early-stage training validation.
+- `tools/run_phase7_observation.sh`
+  - Bounded full-data observation launcher.
+- `tools/analyze_phase7_observation.py`
+  - Offline analyzer for saved trajectories and observation logs.
+- `tools/probe_rollout_speed_candidates.py`
+  - Minimal speed probe used to compare rollout-like decode modes without modifying `lightrft/`.
+
+## Active Entry Points
+
+If you only want the current Stage 3 reproduction path, the usual files are:
+
+- `run_grpo_math_prm_ursa_8b.sh`
+- `train_colocate.py`
+- `reward_models.py`
+- `reward_models_utils.py`
+- `tools/prepare_ursa_stage3_manifest.py`
+- `tools/check_hf_rollout.py`
+- `tools/test_phase2_alignment.py`
+
+## Temporary Working Docs
+
+Two kinds of documents still exist only to support the current migration/debugging cycle and are expected to be removed after the work is fully concluded:
+
+- `examples/math_prm/URSA_MIGRATION.md`
+  - Temporary migration notes from the original URSA-MATH repo into LightRFT.
+- `/data/LightRFT/plan/*`
+  - Working notes, phase tracking, failure analyses, and profiling investigations created during the migration.
+
+These are intentionally kept outside the long-term stable training surface. Once the migration is fully closed out and the conclusions have been folded into permanent docs or code comments, they should be deleted.
+
+## Local Resources
+
+Current machine layout:
+
 ```bash
-git clone https://github.com/AI45Research/SafeWork-R1.git
-cd SafeWork-R1/training_code
+URSA actor:      /home/ubuntu/URSA-MATH/checkpoints/URSA-8B
+URSA reward:     /home/ubuntu/URSA-MATH/checkpoints/URSA-RM-8B
+MMathCoT-1M raw: /home/ubuntu/URSA-MATH/datasets/URSA-MATH/MMathCoT-1M/train.jsonl
+Image root:      /home/ubuntu/URSA-MATH/datasets/URSA-MATH/images
 ```
 
-2. **Install dependencies**:
+Current converted manifest:
+
 ```bash
-# Install core training framework
-pip install -e .
-
-# Install instruction-following reward library
-pip install git+https://github.com/puyuan1996/if_reward.git
-
-# Install additional dependencies
-pip install zhconv nltk
-python -m nltk.downloader punkt punkt_tab
+/data/LightRFT/tmp/ursa_stage3/mmathcot_stage3_math_psgrpo.jsonl
 ```
 
-3. **Configure environment** (if behind proxy):
+Current converted manifest summary:
+
 ```bash
-export http_proxy="http://your-proxy:port"
-export https_proxy="http://your-proxy:port"
+/data/LightRFT/tmp/ursa_stage3/mmathcot_stage3_math_psgrpo.summary.json
 ```
 
-## Quick Start
+## Dataset Preparation
 
-### 1. Prepare Your Data
+The raw Stage 3 data is not directly consumable by `PromptDatasetVL`.
 
-Organize your training data in JSONL format:
+Raw schema:
+
 ```json
-{"conversations": [{"from": "human", "value": "prompt with optional <image>"}, {"from": "gpt", "value": "response"}]}
-```
-
-### 2. Prepare Reward Models
-
-Download the SafeWork-R1 reward models:
-- [SafeWork-RM-Safety-7B](https://huggingface.co/AI45Research/SafeWork-RM-Safety-7B)
-- [SafeWork-RM-Value-72B](https://huggingface.co/AI45Research/SafeWork-RM-Value-72B)
-- [SafeWork-RM-Knowledge-72B](https://huggingface.co/AI45Research/SafeWork-RM-Knowledge-72B)
-
-### 3. Run Training
-
-#### Option A: Quick Start with Qwen2.5-VL-7B
-
-```bash
-bash run_grpo_kg_qwenvl.sh
-```
-
-This script trains a Qwen2.5-VL-7B model with Knowledge and General reward models.
-
-#### Option B: Full Training with All Verifiers (Qwen2.5-VL)
-
-```bash
-bash run_grpo_svkng_fsdp_qwenvl.sh
-```
-
-This script uses all reward models (Safety, Value, Knowledge, Normal, General) for comprehensive alignment.
-
-#### Option C: DeepSeek-R1-70B Training
-
-```bash
-bash run_grpo_svki_fsdp_deepseek.sh
-```
-
-This script trains the DeepSeek-R1-Distill-Llama-70B model with Safety, Value, and Knowledge verifiers.
-
-### 4. Monitor Training
-
-Training logs and checkpoints will be saved to the output directory specified in the script. You can monitor training progress via:
-- **Weights & Biases**: Automatically logged if wandb is configured
-- **Console logs**: Training loss, reward scores, KL divergence
-- **Checkpoint files**: Model states saved at regular intervals
-
-## Configuration
-
-### Key Training Parameters
-
-Edit the training scripts to customize these parameters:
-
-```bash
-# RL Training Parameters
-N_SAMPLES=8          # Number of responses per prompt
-EPISODE=3            # Total training episodes
-LR=1e-6              # Learning rate
-MAX_LENGTH=8192      # Maximum sequence length
-
-# Batch Sizes
-TBS=32               # Total training batch size
-RBS=64               # Total rollout batch size
-
-# Reward Model Weights
-RM_VALUE_WEIGHT=1.0      # Weight for value verifier
-RM_SAFETY_WEIGHT=1.0     # Weight for safety verifier
-RM_KNOWLEDGE_WEIGHT=1.0  # Weight for knowledge verifier
-```
-
-### Distributed Training Strategy
-
-**DeepSpeed ZeRO**:
-```bash
---zero_stage 2 \           # ZeRO optimization stage (1/2/3)
---bf16 \                   # Use BF16 mixed precision
---gradient_checkpointing   # Enable gradient checkpointing
-```
-
-**PyTorch FSDP**:
-```bash
---fsdp \                   # Enable FSDP mode
---bf16 \                   # Use BF16 mixed precision
---gradient_checkpointing   # Enable gradient checkpointing
-```
-
-### Reward Model Configuration
-
-Specify reward models in `reward_models_utils.py` or via command-line:
-
-```python
-RECIPE = {
-    "value": {
-        "path": "AI45Research/SafeWork-RM-Value-72B",
-        "weight": 1.0,
-        "use_engine": False  # Use HF inference (True for SGLang)
-    },
-    "safety": {
-        "path": "AI45Research/SafeWork-RM-Safety-7B",
-        "weight": 1.0,
-        "use_engine": True   # Use SGLang for faster inference
-    },
-    # ... more reward models
+{
+  "image_url": "...",
+  "instruction": "...",
+  "output": "..."
 }
 ```
 
-## Advanced Usage
+Converted LightRFT schema:
 
-### Custom Reward Models
-
-To add your own reward model:
-
-1. **Implement the reward model class** in `reward_models.py`:
-```python
-class MyCustomRM(nn.Module):
-    def forward(self, input_ids, attention_mask, **kwargs):
-        # Your reward computation logic
-        return scores
-```
-
-2. **Register in reward_models_utils.py**:
-```python
-RECIPE["custom"] = {
-    "path": "path/to/your/model",
-    "weight": 1.0,
-    "class": "MyCustomRM"
+```json
+{
+  "prompt": "...",
+  "images": ["/abs/path/to/image.png"],
+  "reference": "...",
+  "label": "math_psgrpo"
 }
 ```
 
-3. **Update training script** to include your reward model.
-
-### Multi-Turn Training
-
-Enable multi-turn RL training with conversation history:
+Run a smoke conversion:
 
 ```bash
---multi_turn \
---max_turns 3 \
---turn_separator "<|end_of_turn|>"
+python examples/math_prm/tools/prepare_ursa_stage3_manifest.py \
+  --max-samples 32 \
+  --output-path /data/LightRFT/tmp/ursa_stage3/smoke_manifest.jsonl \
+  --summary-path /data/LightRFT/tmp/ursa_stage3/smoke_manifest.summary.json
 ```
 
-### EMA Model
-
-Enable Exponential Moving Average for training stability:
+Run the default conversion:
 
 ```bash
---enable_ema \
---ema_decay 0.999 \
---ema_update_interval 10
+python examples/math_prm/tools/prepare_ursa_stage3_manifest.py
 ```
 
-## Trained Models
+## Training
 
-Using this training code, we have successfully trained the following SafeWork-R1 models:
+Expected current-machine values in `examples/math_prm/run_grpo_math_prm_ursa_8b.sh`:
 
-| Model | Base Model | Parameters | Link |
-|-------|------------|------------|------|
-| SafeWork-R1 | Qwen2.5-VL-72B | 72B | [🤗 HF](https://huggingface.co/AI45Research/SafeWork-R1) |
-| SafeWork-R1-InternVL3-78B | InternVL3-78B | 78B | [🤗 HF](https://huggingface.co/AI45Research/SafeWork-R1-InternVL3-78B) |
-| SafeWork-R1-DeepSeek-70B | DeepSeek-R1-Distill-Llama-70B | 70B | [🤗 HF](https://huggingface.co/AI45Research/SafeWork-R1-DeepSeek-70B) |
-| SafeWork-R1-Qwen2.5VL-7B | Qwen2.5-VL-7B | 7B | [🤗 HF](https://huggingface.co/AI45Research/SafeWork-R1-Qwen2.5VL-7B) |
-
-## Troubleshooting
-
-### Common Issues
-
-1. **CUDA Out of Memory**
-   - Reduce batch size (`TBS`, `RBS`)
-   - Enable gradient checkpointing
-   - Use DeepSpeed ZeRO-3 or FSDP CPU offloading
-   - Reduce `MAX_LENGTH`
-
-2. **Reward Model Loading Errors**
-   - Verify reward model paths are correct
-   - Ensure sufficient GPU memory for all reward models
-   - Use `--rm_use_engine` to offload RMs to SGLang
-
-3. **Slow Training**
-   - Enable SGLang engine for reward models (`use_engine: True`)
-   - Use vLLM for faster generation
-   - Increase batch size if memory allows
-   - Check network bandwidth for data loading
-
-4. **Wandb Upload Failures**
-   - Configure proxy settings if behind firewall
-   - Use `--wandb_mode offline` for offline logging
-   - Check wandb API key: `wandb login`
-
-## Performance Tips
-
-- **Use mixed precision (BF16)** for faster training on A100/H100 GPUs
-- **Enable flash attention** if your model supports it
-- **Use SGLang engine** for reward models to reduce inference overhead
-- **Tune gradient accumulation** to maximize GPU utilization
-- **Profile your training** to identify bottlenecks
-
-## Citation
-
-If you use this training code, please cite:
-
-```bibtex
-@misc{lab2025safework,
-  title={SafeWork-R1: Coevolving Safety and Intelligence under the AI-45 Law},
-  author={Lab, Shanghai AI and Bao, Yicheng and Chen, Guanxu and Chen, Mingkang and Chen, Yunhao and Chen, Chiyu and Chen, Lingjie and Chen, Sirui and Chen, Xinquan and Cheng, Jie and others},
-  journal={arXiv preprint arXiv:2507.18576},
-  year={2025}
-}
+```bash
+PATH_TO_YOUR_BASE_MODEL="/home/ubuntu/URSA-MATH/checkpoints/URSA-8B"
+PATH_TO_URSA_RM="/home/ubuntu/URSA-MATH/checkpoints/URSA-RM-8B"
+PATH_TO_YOUR_MATH_DATASET="/data/LightRFT/tmp/ursa_stage3/mmathcot_stage3_math_psgrpo.jsonl"
+EXPECTED_REWARD_LABEL="math_psgrpo"
 ```
 
-## License
+Run training:
 
-This project is licensed under the Apache 2.0 License. See [LICENSE](../../LICENSE) for details.
+```bash
+bash examples/math_prm/run_grpo_math_prm_ursa_8b.sh
+```
 
-## Acknowledgments
+## Reward Labels
 
-- The SafeLadder framework builds upon research in safe RLHF and multi-principled alignment
-- We thank the open-source community for DeepSpeed, FSDP, vLLM, and SGLang
-- Special thanks to the Qwen, InternVL, and DeepSeek teams for their excellent base models
+- `math_prm`
+  - Pure PRM reward using `min(step_scores)`.
+- `math_psgrpo`
+  - PS-GRPO reward computed inside `MathPRMReward`.
+- `math_prm_combined`
+  - PRM plus explicit rule baseline.
+- `math_rule`
+  - Rule-only ablation baseline.
 
-## Contact
+## Troubleshooting Shortcuts
 
-For questions or issues:
-- Open an issue on [GitHub](https://github.com/AI45Research/SafeWork-R1/issues)
-- Visit our [project page](https://safework-r1.ai45.shlab.org.cn/)
-- Check the [technical report](https://arxiv.org/abs/2507.18576)
+- Rebuild the manifest:
+
+```bash
+python examples/math_prm/tools/prepare_ursa_stage3_manifest.py
+```
+
+- Validate the local `hf` rollout path:
+
+```bash
+python examples/math_prm/tools/check_hf_rollout.py
+```
+
+- Run regressions:
+
+```bash
+python -m unittest -q examples.math_prm.tools.test_phase2_alignment
+```
+
+- Run the Phase 3 smoke script:
+
+```bash
+bash examples/math_prm/tools/run_phase3_smoke.sh
+```
