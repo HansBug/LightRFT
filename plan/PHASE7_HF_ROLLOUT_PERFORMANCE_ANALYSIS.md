@@ -1,90 +1,177 @@
 # Phase 7 HF Rollout 性能问题分析
 
-本文档记录 `Phase 7` 在格式稳定性问题修复之后，仍然保留下来的推理性能问题。这里讨论的是：
+本文档记录 `Phase 7` 在格式稳定性问题基本修复之后，仍然保留下来的 rollout 性能问题。这里讨论的是：
 
 - 为什么当前本地 `hf` 多模态 rollout 仍然明显偏慢
-- 时间主要耗在什么地方
-- 在当前约束下有没有希望继续优化
-- 更可能有效的解法是什么
+- 当前慢到什么程度，是否已经超出“正常的 HF 路径损耗”
+- 单独运行 `URSA-8B` 的时候到底是不是也这么慢
+- 在当前约束下，合理的 rollout 时间量级应该是多少
+- 接下来应该如何最小化拆解问题，而不是盲目改代码
 
 ## 1. 当前结论
 
 先给结论：
 
-- 当前“超级无敌慢到 20 分钟内跑不出样本”的版本已经解决
-- 但“本地 `hf` rollout 依然明显偏慢”的问题仍然存在
-- 从最新真实运行看，主要瓶颈明确在 `rollout generate`
+- 当前“超级无敌慢到 20 分钟内跑不出样本”的最早版本已经不是主状态
+- 但“本地 `hf` rollout 依然极端偏慢”的问题仍然存在
+- 按 `2026-03-20` 的新增基线看，这个慢法已经不是“HF 路径正常偏慢”，而是明显异常
+- 单独运行 `URSA-8B` 并不会慢到几十分钟，更不会慢到一小时一个 step
+- 当前真实训练里，一个 `global step` 跑到十几分钟乃至一小时，根因明确在 `rollout generate`
 - 不是 PPO train、不是 reward model、也不是 checkpoint save 在主导总时长
-- 在当前冻结环境里，最有价值的长期解法仍然是重新获得 `vllm/sglang` 级别的 rollout 支持
-- 如果只能继续停留在 `hf` 路径里，可以做一些工程优化，但预期收益大概率有限
+- 当前最可疑的根因组合是：
+  - 本地 `hf` rollout 直接复用 FSDP 分片训练 actor
+  - rollout 期间仍带着训练态的 `gradient_checkpointing`
+  - 运行时日志已经明确显示 KV cache 实际被关掉
 
 ## 2. 证据：时间主要耗在 generate
 
-最新健康通过的真实 run：
+历史健康通过的 `Phase 7` run：
 
 - 训练日志：
   - `/data/LightRFT/tmp/ursa_stage3/phase7_observation/phase7_observation_20260319_233851.log`
 - 观测摘要：
   - `/data/LightRFT/tmp/ursa_stage3/phase7_observation/phase7_summary_20260319_233851.json`
 
-日志里的关键时间点：
-
-- `23:41:28`
-  - `Start VLM gather_and_generate ..., total prompts: 4`
-- `23:52:30`
-  - `step 0 generate length: {'total_samples': 32, ...}`
-  - `***Rollout engine generation time (global max): 661.9063s`
-- `23:53:25`
-  - `DCP checkpoint saved ...`
-
-把这几个时间点换算以后：
-
-- `generate_s = 662`
-- `post_generate_to_ckpt_s = 55`
-- `total_s = 717`
-- `generate_ratio = 662 / 717 = 0.9233`
-
-也就是：
+这轮已经显示：
 
 - 约 `92.3%` 的总耗时都花在 rollout generate
 - generate 之后到训练、trajectory 保存、checkpoint 落盘合计只占约 `7.7%`
 
 这已经足够说明：
 
-- 现在的主性能瓶颈非常明确，就是本地 `hf` 的多模态生成
+- 当前主性能瓶颈非常明确，就是本地 `hf` 的多模态生成
 
-## 3. 进一步量化：吞吐确实偏低
+## 2.1 `2026-03-20` 最新 Stage 3 长跑日志：已经不是“略慢”，而是明显异常
 
-同一轮日志里：
+新的真实日志：
 
-- `total_samples = 32`
-- `mean_length = 148.875`
+- `/data/LightRFT/rft_logs/lightrft-ursa8b-stage3-psgrpo-2h-stability-v2/node0_20260320_091239.log`
 
-粗略估算总生成 token 数：
+这份日志比上一轮更能说明问题，因为它已经真实走到了多个 `global step`。
 
-- `32 * 148.875 = 4764`
+第一轮：
 
-对应吞吐大约是：
+- `Start VLM gather_and_generate ..., total prompts: 16`
+- `step 0 generate length: total_samples=128, mean_length=150.078125`
+- `***Rollout engine generation time (global max): 802.7335s`
+- `PPO Train TIMECOST 8.8986s`
 
-- 全局生成吞吐：`4764 / 661.9063 ≈ 7.2 tokens/s`
-- 按 8 张 GPU 粗分：`≈ 0.9 tokens/s/GPU`
+第二轮：
 
-这个速度对于当前规模的 VLM rollout 来说，明显偏慢。
+- 仍然是 `total prompts: 16`
+- `***Rollout engine generation time (global max): 3895.6270s`
+- `PPO Train TIMECOST 7.8046s`
 
-这里不需要纠结这个数字是否“绝对精确到最后一位”，因为它已经足够说明问题：
+换句话说：
+
+- 第一轮光 generate 就花了约 `13.4` 分钟
+- 第二轮光 generate 就花了约 `64.9` 分钟
+- 但 PPO train 始终只有 `8` 秒左右
+
+所以“为什么一个多小时才一个 global step”这个问题，现在已经可以明确回答：
+
+- **不是训练更新慢**
+- **不是奖励模型慢**
+- **而是 rollout generate 异常慢**
+- **并且第二轮比第一轮又进一步膨胀，说明这不是一个稳定但略慢的系统**
+
+## 3. 进一步量化：当前吞吐确实偏低
+
+用第一轮日志里的数粗估：
+
+- `total_samples = 128`
+- `mean_length = 150.078125`
+
+粗略总生成 token 数：
+
+- `128 * 150.078125 ≈ 19210`
+
+对应吞吐大约：
+
+- 全局生成吞吐：`19210 / 802.7335 ≈ 23.9 tokens/s`
+
+这里不需要纠结是否精确到最后一位，因为它已经足够说明问题：
 
 - 当前不是略慢
 - 而是明显慢
 
+## 3.1 单独运行 URSA-8B 的直接推理基线
+
+为了回答“单独运行 8B 模型的时候也这么慢吗”，我直接绕开 LightRFT rollout，只跑了：
+
+- 单卡 `cuda:0`
+- 原生 `URSA-8B`
+- 直接 `model.generate()`
+- 使用和训练接近的采样参数：
+  - `temperature=1.0`
+  - `top_p=1.0`
+  - `repetition_penalty=1.05`
+  - `no_repeat_ngram_size=4`
+  - `max_new_tokens=1024`
+
+选取的是当前 Stage 3 manifest 里的真实多模态样本。
+
+结果如下：
+
+- `batch_size=4`
+  - `time_sec=9.703`
+  - `generated_tokens_mean=131.0`
+  - `generated_tokens_max=208`
+  - `peak_mem_gb=19.91`
+- `batch_size=8`
+  - `time_sec=14.663`
+  - `generated_tokens_mean=179.25`
+  - `generated_tokens_max=315`
+  - `peak_mem_gb=24.77`
+- `batch_size=16`
+  - `time_sec=16.481`
+  - `generated_tokens_mean=151.375`
+  - `generated_tokens_max=303`
+  - `peak_mem_gb=34.49`
+
+这组数据足够说明两件事：
+
+- 单独运行 `URSA-8B` **不是**几十分钟量级
+- 同等输出长度下，单卡直接推理是 **十几秒** 量级
+
+因此，当前 rollout 的慢，不能用“URSA 本来就慢”来解释。
+
+## 3.2 小批对照：训练态 + gradient checkpointing 确实会变慢，但仍不该慢到小时级
+
+我还做了一个更小的控制实验，只看两条真实样本、`max_new_tokens=256`，比较训练态和 `gradient_checkpointing` 的影响：
+
+- `eval_gc_off`
+  - `time_sec=7.085`
+  - `max_gen_tokens=151`
+- `eval_gc_on`
+  - `time_sec=9.731`
+  - `max_gen_tokens=243`
+- `train_gc_on`
+  - `time_sec=33.198`
+  - `max_gen_tokens=144`
+
+这个结果说明：
+
+- 单看 `gradient_checkpointing + train mode`，确实能把直接推理拖慢到 `2x~5x`
+- 但它依然是 **几十秒** 量级
+- 这还不足以单独解释当前真实 rollout 里 `802s` 甚至 `3895s` 的极端慢速
+
+所以更合理的判断是：
+
+- `gradient_checkpointing` 是重要因素
+- 但不是唯一因素
+- 很可能还叠加了 FSDP 分片训练 actor 直接参与 autoregressive decode 的通信/重组成本
+
 ## 4. 当前不太像瓶颈的部分
 
-从这轮日志看，下面这些并不是主瓶颈：
+从真实训练日志看，下面这些不是主瓶颈：
 
 ### 4.1 PPO train
 
 日志中：
 
-- `Train epoch [1/1]` 从第一条进度到 `100%`，只用了大约 `7` 秒
+- 第一轮 `PPO Train TIMECOST 8.8986s`
+- 第二轮 `PPO Train TIMECOST 7.8046s`
 
 因此：
 
@@ -92,12 +179,12 @@
 
 ### 4.2 reward model / initial model / critic 的 reload/offload
 
-日志中：
+日志中有：
 
 - `after reload_model`
 - `after offload_model`
 
-这些阶段确实存在，但它们都发生在 generate 之后，而且整个 generate 后半段到 checkpoint 合计也只有约 `55` 秒。
+这些阶段确实存在，但量级远小于前面的 generate。
 
 因此：
 
@@ -105,11 +192,6 @@
 - 但不是当前最重的成本
 
 ### 4.3 trajectory 保存 / checkpoint 保存
-
-日志中：
-
-- `Saved 4 trajectories`
-- `DCP checkpoint saved`
 
 这些都发生在最后阶段，量级明显小于前面的 generate。
 
@@ -125,17 +207,13 @@
 
 代码上：
 
-- `/data/LightRFT/lightrft/strategy/strategy_base.py`
+- `/data/LightRFT/lightrft/strategy/strategy_base.py:715`
+- `/data/LightRFT/lightrft/strategy/strategy_base.py:719`
 
 当前 `engine_type='hf'` 的语义是：
 
 - 直接复用训练 actor 作为 inference engine
 - 不会像 `vllm/sglang` 那样单独起一个专门的高吞吐推理 runtime
-
-对应代码里也明确写着：
-
-- `engine_type='hf' requires the prepared actor to be passed in`
-- `Skip update engine weights for local HF engine because it reuses the actor directly.`
 
 这条路径的优点是：
 
@@ -158,11 +236,9 @@
 
 这天然比纯文本模型更重。
 
-即使格式 bug 已修复，这层成本仍然存在。
-
 ### 5.3 当前外部高性能 rollout 引擎在冻结环境里不可用
 
-这个项目里最大的潜在性能杠杆，其实是：
+最大的潜在性能杠杆其实是：
 
 - `vllm`
 - `sglang`
@@ -171,31 +247,81 @@
 
 - `/data/LightRFT/plan/URSA_ROLLOUT_ENGINE_FAILURE_ANALYSIS.md`
 
-也就是说，现在之所以还停留在 `hf` 路径，并不是因为 `hf` 更快，而是因为：
+也就是说，现在之所以停留在 `hf` 路径，并不是因为 `hf` 更快，而是因为：
 
 - 它是当前冻结环境里唯一真正可用的 rollout 路径
 
-因此，从工程现实上讲：
+### 5.4 当前 rollout 使用的是已经 FSDP 包装过的训练 actor
 
-- 当前性能问题有一部分是“被架构选择锁死”的
-- 不是简单调几个采样参数就能完全抹平
+训练准备阶段里，actor 在进入 rollout 之前就已经被 `prepare_model(..., is_training=True)` 包成了 FSDP 训练模型：
 
-### 5.4 当前 rollout 仍然在做完整 autoregressive decode
+- `/data/LightRFT/lightrft/strategy/strategy_base.py:561`
+- `/data/LightRFT/lightrft/strategy/strategy_base.py:564`
 
-即使格式已经稳定，当前这轮的生成长度仍然是：
+而本地 `hf` rollout 的生成入口只是直接调用：
 
-- `min=45`
-- `max=455`
-- `mean=148.875`
+- `/data/LightRFT/lightrft/strategy/strategy_base.py:951`
+- `/data/LightRFT/lightrft/strategy/strategy_base.py:952`
+- `/data/LightRFT/lightrft/models/actor_vl.py:252`
+- `/data/LightRFT/lightrft/models/actor_vl.py:276`
 
-而且是多样本 rollout：
+这意味着当前 rollout 非常可能是在：
 
-- `n_samples_per_prompt = 4`
+- 一个 **FSDP 分片训练模型**
+- 上面直接做 **autoregressive decode**
 
-这意味着：
+这和“单独加载一个完整的、纯推理用途的 URSA 模型”完全不是一条路径。
 
-- 当前仍然在做一批真正的、多样本、多 token 的多模态 decode
-- 工作量本身并不小
+### 5.5 当前 rollout 期间 KV cache 实际失效
+
+虽然 `ActorVL.generate()` 会把 `use_cache=True` 传给 `model.generate()`，但运行时日志已经明确显示 cache 实际被关闭：
+
+- `/data/LightRFT/examples/math_prm/train_colocate.py:458`
+- `/data/LightRFT/examples/math_prm/train_colocate.py:460`
+- `/data/LightRFT/rft_logs/lightrft-ursa8b-stage3-psgrpo-2h-stability-v2/node0_20260320_091239.log:6868`
+- `/data/LightRFT/rft_logs/lightrft-ursa8b-stage3-psgrpo-2h-stability-v2/node0_20260320_091239.log:6975`
+
+日志原文说明：
+
+- `use_cache=True is incompatible with gradient checkpointing. Setting use_cache=False.`
+- `Caching is incompatible with gradient checkpointing in FSDPQwen2DecoderLayer. Setting past_key_values=None.`
+
+这条证据非常关键，因为 autoregressive decode 在没有 KV cache 的情况下会明显变慢。
+
+### 5.6 当前 rollout 的“合理时间”应该是什么量级
+
+按当前脚本配置粗估：
+
+- `rollout_batch_size=32`
+- `world_size=8`
+- 每个 rank 大约处理 `4` 个 prompt
+- `n_samples_per_prompt=4`
+- 所以每个 rank 大约会生成 `16` 条 response
+- 当前 `LOCAL_HF_GENERATE_MAX_BATCH_SIZE=8`
+- 所以每个 rank 大约分成 `2` 个本地 generate chunk
+
+如果按上面的直接 URSA 基线看：
+
+- `batch_size=8` 一次 generate 大约 `14.7s`
+- 那每个 rank 生成 16 条 response，大约就是 `29.3s`
+
+再保守加上：
+
+- reward / postprocess / gather 等开销几十秒
+- PPO train 约 `8s`
+
+那么**不使用 vLLM/sglang、只走本地 HF** 时，一个 `global step` 的合理量级大致应该是：
+
+- 乐观：`1` 分钟左右
+- 保守：`1~3` 分钟
+- 即使偏慢：`5` 分钟也已经算比较慢了
+
+而当前真实日志里：
+
+- 第一轮 generate = `802.7s`
+- 第二轮 generate = `3895.6s`
+
+因此，当前 rollout 并不是“HF 路径正常偏慢”，而是**明显异常偏慢**。
 
 ## 6. 当前约束下，性能问题有没有希望继续改善
 
@@ -205,18 +331,12 @@
 
 例如：
 
-- 再收紧 smoke / observation 的 decode budget
+- 继续收紧 decode budget
 - 降低 `n_samples_per_prompt`
 - 降低 `generate_max_len`
 - 继续优化 stop 条件，让无效尾部更早停住
 
-这类优化的特点是：
-
-- 实现相对容易
-- 风险较低
-- 对 bounded run 很有帮助
-
-但它们改善的是：
+这类优化改善的是：
 
 - “总要生成多少 token”
 
@@ -224,7 +344,7 @@
 
 - “每个 token 本身生成有多快”
 
-所以这类办法对 smoke 很有效，但不能从根上把 `hf` 路径变成高吞吐引擎。
+所以它们对 bounded run 很有帮助，但不能从根上把 `hf` 路径变成高吞吐引擎。
 
 ### 6.2 中等概率能改善的是 HF 路径里的工程细节
 
@@ -241,13 +361,6 @@
 - 改动复杂度高
 - 对训练主链可能有兼容性风险
 
-而且当前还没有证据表明这里只要做一个小改动就能拿到数量级提升。
-
-因此：
-
-- 有希望
-- 但不应该对短期收益过度乐观
-
 ### 6.3 最大收益的方向仍然是外部推理引擎
 
 如果能让 URSA 真正稳定跑在：
@@ -259,28 +372,11 @@
 
 这是当前我认为最有希望的长期方向。
 
-但现实约束也很明确：
-
-- 当前冻结环境下，这条路还没打通
-- 不是一个“小修小补”级别的问题
-
-所以它是：
-
-- 高收益
-- 高成本
-- 当前被环境/架构兼容性阻塞
-
 ## 7. 我对可能解法的排序
 
 按“当前约束下的现实可行性”排序，我会这样看：
 
 ### 方案 A：继续把 observation/smoke 的 decode 工作量压小
-
-可做内容：
-
-- 更激进地限制 `generate_max_len`
-- 更激进地限制 `n_samples_per_prompt`
-- 继续打磨 structured stop，让结束更早更稳定
 
 优点：
 
@@ -293,18 +389,7 @@
 - 治标不治本
 - 不会把 `hf` rollout 变成真正高吞吐
 
-判断：
-
-- 最现实
-- 最适合作为“继续做实验的工程手段”
-
 ### 方案 B：专门 profile HF rollout，找二级热点
-
-可做内容：
-
-- 对 `actor.generate()` 前后加更细的时间统计
-- 把 prefill / decode / image preprocess / RM / trainer 分开记时
-- 看是否有特定子阶段异常重
 
 优点：
 
@@ -316,19 +401,7 @@
 - 本身不直接提速
 - 需要额外分析轮次
 
-判断：
-
-- 很值得做
-- 应该是如果后面继续碰性能，最先做的动作
-
 ### 方案 C：在 HF 路径里继续做深层工程优化
-
-可做内容：
-
-- 缓存图像特征
-- 优化 batch 组织
-- 避免重复 prefill
-- 探索训练 actor 与推理 actor 的更轻量分离方式
 
 优点：
 
@@ -339,11 +412,6 @@
 - 改动复杂
 - 风险高
 - 可能破坏现有训练链
-- 当前没有足够证据保证收益
-
-判断：
-
-- 有希望，但不应盲做
 
 ### 方案 D：重新打通 vLLM/SGLang rollout
 
@@ -354,40 +422,111 @@
 
 缺点：
 
-- 当前是被环境和 URSA 架构支持卡住的
+- 当前被环境和 URSA 架构支持卡住
 - 成本最高
 
-判断：
+## 7.1 下一步准备做的最小化对照矩阵
 
-- 长期最值得
-- 短期最难
+为了把“到底是哪一层慢”彻底拆清楚，后续优先做下面这几组对照。这里先把位子留出来，结果后补：
+
+### 对照 A：raw URSA，单卡，`eval + gc off`
+
+- 目的：
+  - 建立最干净的单独推理基线
+- 当前状态：
+  - 已部分完成，见上面的直接基线
+- 待补字段：
+  - `batch_size=8` 重复测 `N` 次后的均值 / 方差
+  - `batch_size=16` 重复测 `N` 次后的均值 / 方差
+  - `tokens/s`
+
+### 对照 B：raw URSA，单卡，`train + gc off`
+
+- 目的：
+  - 分离 “train mode 本身” 和 “gradient checkpointing” 的影响
+- 当前状态：
+  - 待补
+- 待补字段：
+  - `batch_size=8` 时间
+  - `tokens/s`
+  - 与对照 A 的倍率
+
+### 对照 C：raw URSA，单卡，`train + gc on`
+
+- 目的：
+  - 量化 `gradient_checkpointing -> cache 失效` 带来的直接损耗
+- 当前状态：
+  - 已做过小批控制实验，确认会明显变慢
+  - 但还缺和当前 Stage 3 workload 更接近的稳定基线
+- 待补字段：
+  - `batch_size=8` 时间
+  - `tokens/s`
+  - 与对照 A / B 的倍率
+
+### 对照 D：LightRFT actor，单卡或最小分布式，`FSDP + gc off`
+
+- 目的：
+  - 单独看 FSDP 分片训练 actor 做 rollout 时的额外损耗
+- 当前状态：
+  - 待补
+- 待补字段：
+  - `batch_size=8` 时间
+  - `tokens/s`
+  - 与 raw URSA 的倍率
+
+### 对照 E：LightRFT actor，单卡或最小分布式，`FSDP + gc on`
+
+- 目的：
+  - 复现最接近当前真实 rollout 的最小慢路径
+- 当前状态：
+  - 待补
+- 待补字段：
+  - `batch_size=8` 时间
+  - `tokens/s`
+  - 与当前真实训练日志是否同量级
+
+### 对照 F：真实 rollout 8 卡长跑，首个 `global step`
+
+- 目的：
+  - 用真实训练环境验证最终量级
+- 当前状态：
+  - 已有异常慢日志
+- 已知结果：
+  - 第一轮 `generate=802.7335s`
+  - 第二轮 `generate=3895.6270s`
+- 待补字段：
+  - 如果后续修复，再记录修复后的首轮 generate 耗时
+  - 是否回到分钟级
 
 ## 8. 最终判断
 
 基于当前证据，我的判断是：
 
 - 当前性能问题是真实存在的
-- 但它已经不再阻塞 `Phase 7` 的 bounded 观测完成
-- 如果只是为了继续推进后续 phase，可以先接受当前速度
-- 如果目标是“把 Stage 3 训练做成长期高效可重复跑的方案”，那这个问题迟早还得处理
+- 当前 slowdown 并不能用“URSA 本来就慢”来解释
+- 当前一个 `global step` 跑到十几分钟乃至一小时，**不正常**
+- 如果只是为了继续推进后续 phase，可以先接受当前速度做短时观测
+- 但如果目标是“把 Stage 3 训练做成长期高效可重复跑的方案”，这个问题迟早还得处理
 
 更具体地说：
 
-- 短期：可以先接受，继续推进后续 reward / 数据 / 训练质量工作
-- 中期：值得补一轮更细的 profiling
+- 短期：先把问题彻底拆清楚，不急着盲改
+- 中期：优先做上面的最小化对照矩阵
 - 长期：最值得的方向仍然是重新获得 `vllm/sglang` 级别的 rollout 支持
 
 ## 9. 建议的下一步
 
 如果后面要继续处理性能，我建议顺序是：
 
-1. 先补更细的 rollout profiling，而不是直接猜优化点
-2. 先看 HF 路径里是不是某个子阶段异常重
-3. 如果 HF 路径没有明显低垂果子，就不要在这里无上限深挖
-4. 转而评估重新支持 `vllm/sglang` 的成本与收益
+1. 先做上面的最小化对照矩阵，而不是直接猜优化点
+2. 先分离 `raw URSA`、`train mode`、`gradient_checkpointing`、`FSDP` 这几个因素
+3. 如果确认真正的主杀伤项是 `FSDP + gc + local hf actor reuse`，再决定是否改 rollout 运行上下文
+4. 如果 HF 路径没有明显低垂果子，就不要在这里无上限深挖
+5. 转而评估重新支持 `vllm/sglang` 的成本与收益
 
 因此，当前最合理的状态是：
 
-- 问题已经盘清楚
-- 不急着立刻解决
+- 问题已经基本盘清楚
+- 现在还不急着直接改代码
+- 先用最小化对照把慢点彻底拆清楚
 - 先把它作为“已知性能短板”记录下来，避免之后误判成格式或 reward 问题
