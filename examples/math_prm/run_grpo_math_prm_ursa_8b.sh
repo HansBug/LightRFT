@@ -79,6 +79,7 @@ else
     fi
 fi
 export WANDB_PROJECT="${WANDB_PROJECT:-LightRFT-URSA8B-Stage3}"
+export WANDB_ORG="${WANDB_ORG:-}"
 
 
 ################################################################################
@@ -135,6 +136,7 @@ export GPUS_PER_NODE=$MLP_WORKER_GPU
 # URSA-8B (8B params + vision towers) requires TP for efficient inference.
 # URSA-8B-RM (8B params) runs on a single GPU; this controls the actor engine.
 ENGINE_TYPE="${ENGINE_TYPE:-hf}"
+HF_SEPARATE_ROLLOUT_ACTOR="${HF_SEPARATE_ROLLOUT_ACTOR:-1}"
 if [[ "${ENGINE_TYPE}" == "hf" ]]; then
     ENGINE_TP="${ENGINE_TP:-1}"
     LOCAL_HF_GENERATE_MAX_BATCH_SIZE="${LOCAL_HF_GENERATE_MAX_BATCH_SIZE:-4}"
@@ -289,9 +291,22 @@ if [[ -n "${WANDB_API_KEY}" && "${WANDB_API_KEY}" != "YOUR_WANDB_API_KEY" ]]; th
         --wandb_project "${WANDB_PROJECT}"
         --wandb_run_name "${WANDB_RUN_NAME}"
     )
+    if [[ -n "${WANDB_ORG}" ]]; then
+        WANDB_ARGS+=(
+            --wandb_org "${WANDB_ORG}"
+        )
+    fi
     echo "[run_grpo_math_prm_ursa_8b.sh] WANDB enabled for this run via ${WANDB_KEY_SOURCE}."
 else
     echo "[run_grpo_math_prm_ursa_8b.sh] WANDB disabled for this run."
+fi
+
+HF_ROLLOUT_ARGS=()
+if [[ "${ENGINE_TYPE}" == "hf" && "${HF_SEPARATE_ROLLOUT_ACTOR}" == "1" ]]; then
+    HF_ROLLOUT_ARGS=(
+        --hf_separate_rollout_actor
+    )
+    echo "[run_grpo_math_prm_ursa_8b.sh] Separate local HF rollout actor enabled."
 fi
 
 EVAL_ARGS=()
@@ -374,6 +389,7 @@ torchrun \
     --engine_tp_size $ENGINE_TP \
     --local_hf_generate_max_batch_size ${LOCAL_HF_GENERATE_MAX_BATCH_SIZE} \
     --enable_engine_sleep \
+    "${HF_ROLLOUT_ARGS[@]}" \
     --system_prompt "${SYSTEM_PROMPT}" \
     --l2 1.0e-2 \
     --freeze_prefix \
