@@ -8,9 +8,11 @@ import torch
 from PIL import Image
 
 
-THIS_DIR = Path(__file__).resolve().parent
-if str(THIS_DIR) not in sys.path:
-    sys.path.insert(0, str(THIS_DIR))
+TOOLS_DIR = Path(__file__).resolve().parent
+MATH_PRM_DIR = TOOLS_DIR.parent
+for path in (TOOLS_DIR, MATH_PRM_DIR):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 from reward_models import MathPRMReward
 from ursa_model import UrsaForTokenClassification, UrsaProcessor

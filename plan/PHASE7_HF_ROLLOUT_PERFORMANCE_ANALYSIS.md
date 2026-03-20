@@ -28,7 +28,7 @@
   - `FSDP` 会继续增加额外开销
   - 当前 rollout 的主问题已经基本定位到“训练态 actor 的 decode 形态”，不是模型本体速度
 - `2026-03-20` 随后又新增了一个更贴近真实 Stage 3 rollout 的最小测速脚本：
-  - `examples/math_prm/probe_rollout_speed_candidates.py`
+  - `examples/math_prm/tools/probe_rollout_speed_candidates.py`
   - 它用 `8` 卡、每个 rank `16` 条 response、`chunk_size=8` 来模拟当前本地 `hf` rollout 的核心 decode 形态
   - 这轮结果进一步证明：最关键的提速杠杆不是 train/eval mode，而是 rollout 阶段必须去掉 `gradient_checkpointing`
 
@@ -229,7 +229,7 @@
 
 为了避免只停留在“小 batch 控制实验”，我新增了：
 
-- `/data/LightRFT/examples/math_prm/probe_rollout_speed_candidates.py`
+- `/data/LightRFT/examples/math_prm/tools/probe_rollout_speed_candidates.py`
 
 这个脚本不是训练脚本，也不是库代码修改；它的职责是：
 

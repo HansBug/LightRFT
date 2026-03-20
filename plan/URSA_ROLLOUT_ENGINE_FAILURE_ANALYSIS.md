@@ -220,7 +220,7 @@ ValueError: Cannot find model module. 'UrsaForConditionalGeneration' is not a re
 - 它仍然找不到 `UrsaForConditionalGeneration` 对应的模型模块
 - 且 checkpoint 自身也没有给出足够的 `auto_map`
 
-这和后面新增的 wrapper 脚本说明是完全一致的。`examples/math_prm/prepare_ursa_engine_checkpoint.py` 开头直接写明：
+这和后面新增的 wrapper 脚本说明是完全一致的。`examples/math_prm/tools/prepare_ursa_engine_checkpoint.py` 开头直接写明：
 
 ```python
 The upstream URSA checkpoints do not ship `auto_map` metadata or local model
@@ -264,7 +264,7 @@ the custom architecture via HuggingFace dynamic modules.
 
 为了补 checkpoint 元数据，我们新增了：
 
-- `examples/math_prm/prepare_ursa_engine_checkpoint.py`
+- `examples/math_prm/tools/prepare_ursa_engine_checkpoint.py`
 
 这个脚本的目标不是改模型权重，而是构造一个 “engine-friendly wrapper checkpoint”，它会：
 

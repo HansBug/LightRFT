@@ -223,7 +223,7 @@ if seen != {expected_label}:
     raise SystemExit(
         "[run_grpo_math_prm_ursa_8b.sh] Expected dataset label "
         f"{expected_label!r}, but sampled labels were {sorted(seen)!r}. "
-        "Rebuild the manifest with examples/math_prm/prepare_ursa_stage3_manifest.py "
+        "Rebuild the manifest with examples/math_prm/tools/prepare_ursa_stage3_manifest.py "
         "or override EXPECTED_REWARD_LABEL if you intentionally want another reward path."
     )
 print(
@@ -306,7 +306,7 @@ fi
 if [[ "${ENGINE_TYPE}" != "hf" && "${USE_URSA_ENGINE_WRAPPER}" == "1" && -d "${PATH_TO_YOUR_BASE_MODEL}" ]]; then
     echo "[run_grpo_math_prm_ursa_8b.sh] Preparing URSA engine wrapper checkpoint at ${URSA_ENGINE_CHECKPOINT_DIR}"
     PATH_TO_YOUR_BASE_MODEL="$(
-        python examples/math_prm/prepare_ursa_engine_checkpoint.py \
+        python examples/math_prm/tools/prepare_ursa_engine_checkpoint.py \
             --source-model-path "${PATH_TO_YOUR_BASE_MODEL}" \
             --output-path "${URSA_ENGINE_CHECKPOINT_DIR}"
     )"
@@ -429,7 +429,7 @@ torchrun \
 # Step 5: Run training                                                         #
 #   bash examples/math_prm/run_grpo_math_prm_ursa_8b.sh                       #
 #   - For the Phase 3 baseline smoke path, use                                #
-#       bash examples/math_prm/run_phase3_smoke.sh                             #
+#       bash examples/math_prm/tools/run_phase3_smoke.sh                       #
 #     which exports a math_prm-labeled manifest and time-boxed settings.      #
 #   - For data/resource smoke checks before RL training, you can reuse:        #
 #       python /home/ubuntu/URSA-MATH/examples/run_dataset_loading_example.py  #

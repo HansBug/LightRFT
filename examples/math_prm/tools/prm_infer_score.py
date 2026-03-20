@@ -12,6 +12,8 @@
 # limitations under the License. 
 
 import os
+import sys
+from pathlib import Path
 import fire
 import json
 import torch
@@ -24,6 +26,12 @@ from tqdm import tqdm
 from loguru import logger
 import pandas as pd
 from typing import List, Dict, Union
+
+TOOLS_DIR = Path(__file__).resolve().parent
+MATH_PRM_DIR = TOOLS_DIR.parent
+if str(MATH_PRM_DIR) not in sys.path:
+    sys.path.insert(0, str(MATH_PRM_DIR))
+
 from ursa_model import UrsaProcessor, UrsaForTokenClassification
 
 PROMPT = 'You are given a problem and a step-by-step solution. You need to check the correctness of each step.\nQuestion:'

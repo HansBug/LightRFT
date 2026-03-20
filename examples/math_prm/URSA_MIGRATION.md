@@ -36,7 +36,7 @@ examples/math_prm/ursa_model/
 - Hybrid vision tower: SAM-B (1024x1024) + SigLIP-L (384x384)
 - MLP projector: Maps vision features to LLM embedding space
 
-### 2. PRM Inference Logic (`prm_infer_score.py`)
+### 2. PRM Inference Logic (`tools/prm_infer_score.py`)
 
 Copied from URSA-MATH inference code:
 - `replace_specific_plus_minus_with_ki()`: Inserts Cyrillic ' и' (U+0438) step markers

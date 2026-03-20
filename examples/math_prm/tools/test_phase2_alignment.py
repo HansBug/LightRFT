@@ -10,9 +10,11 @@ import regex as re
 import torch
 
 
-MATH_PRM_DIR = Path(__file__).resolve().parent
-if str(MATH_PRM_DIR) not in sys.path:
-    sys.path.insert(0, str(MATH_PRM_DIR))
+TOOLS_DIR = Path(__file__).resolve().parent
+MATH_PRM_DIR = TOOLS_DIR.parent
+for path in (TOOLS_DIR, MATH_PRM_DIR):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 from reward_models import MathPRMReward
 from reward_models_utils import RewardModelType, load_reward_models, mix_rewards, reward_fn
@@ -505,19 +507,20 @@ class Phase2AlignmentTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["used_mathruler"].item(), 1.0, places=6)
         self.assertAlmostEqual(metrics["final_reward"].item(), 0.5, places=6)
 
-    def test_mix_rewards_still_applies_global_format_reward_for_non_math_labels(self):
-        labels = ["general"]
-        model_scores = torch.tensor([[0.25]], dtype=torch.float32)
-        label_map = {"general": 0}
-        solutions = ["<think>reason</think>\nfinal answer"]
-        refs = [""]
+    def test_reward_fn_supports_math_rule_without_model_reward(self):
+        reward, metrics = reward_fn(
+            model_reward_list=[],
+            model_reward_metrics_list=None,
+            labels=["math_rule"],
+            queries=["Step 1: Compute carefully.\n†Answer: 1/2"],
+            refs=["\\frac{1}{2}"],
+            label_map={},
+        )
 
-        with mock.patch("torch.distributed.get_rank", return_value=0):
-            reward, metrics = mix_rewards(labels, model_scores, label_map, solutions, refs)
-
+        self.assertAlmostEqual(reward.item(), 1.0, places=6)
+        self.assertAlmostEqual(metrics["rule_reward"].item(), 1.0, places=6)
         self.assertAlmostEqual(metrics["format_reward"].item(), 1.0, places=6)
-        self.assertAlmostEqual(metrics["model_reward"].item(), 0.25, places=6)
-        self.assertAlmostEqual(reward.item(), 1.25, places=6)
+        self.assertAlmostEqual(metrics["final_reward"].item(), 1.0, places=6)
 
     def test_sanitize_math_prm_response_truncates_after_first_answer_line(self):
         response = (

@@ -103,7 +103,7 @@ def main() -> None:
 
     source_model_path = Path(args.source_model_path).resolve()
     output_path = Path(args.output_path).resolve()
-    local_ursa_dir = Path(__file__).resolve().parent / "ursa_model"
+    local_ursa_dir = Path(__file__).resolve().parents[1] / "ursa_model"
 
     build_wrapper(source_model_path, output_path, local_ursa_dir)
     print(str(output_path))

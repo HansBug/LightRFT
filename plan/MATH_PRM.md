@@ -269,7 +269,7 @@ PATH_TO_YOUR_MATH_DATASET="/path/to/converted_lightrft_stage3_manifest.jsonl"
 
 当前仓库里已经补上了专门的转换脚本：
 
-- 脚本路径：`/data/LightRFT/examples/math_prm/prepare_ursa_stage3_manifest.py`
+- 脚本路径：`/data/LightRFT/examples/math_prm/tools/prepare_ursa_stage3_manifest.py`
 - 作用：把 URSA raw `image_url / instruction / output` 转成 LightRFT 可直接训练的 `prompt / images / reference / label`
 - 附加动作：脚本会同步做一次 `PromptDatasetVL` smoke 校验，避免只生成文件、不验证载入
 
@@ -309,7 +309,7 @@ PATH_TO_YOUR_MATH_DATASET="/path/to/converted_lightrft_stage3_manifest.jsonl"
 先做小样本 smoke：
 
 ```bash
-python examples/math_prm/prepare_ursa_stage3_manifest.py \
+python examples/math_prm/tools/prepare_ursa_stage3_manifest.py \
   --max-samples 32 \
   --output-path /data/LightRFT/tmp/ursa_stage3/smoke_manifest.jsonl \
   --summary-path /data/LightRFT/tmp/ursa_stage3/smoke_manifest.summary.json
@@ -318,7 +318,7 @@ python examples/math_prm/prepare_ursa_stage3_manifest.py \
 直接做全量转换：
 
 ```bash
-python examples/math_prm/prepare_ursa_stage3_manifest.py
+python examples/math_prm/tools/prepare_ursa_stage3_manifest.py
 ```
 
 当前脚本的关键参数含义需要明确：
@@ -536,7 +536,7 @@ Checklist：
 
 已完成产出：
 
-- 新增转换脚本：`examples/math_prm/prepare_ursa_stage3_manifest.py`
+- 新增转换脚本：`examples/math_prm/tools/prepare_ursa_stage3_manifest.py`
 - 已生成全量 Stage 3 LightRFT manifest：
   - `/data/LightRFT/tmp/ursa_stage3/mmathcot_stage3_math_prm.jsonl`
 - 已生成全量扫描 summary：
@@ -631,9 +631,9 @@ Checklist：
   - 新增 `attrdict_compat.py`，使用 `easydict`/本地 fallback 兼容当前 Docker 基线中缺失的 `attrdict`
   - 修复 `modeling_ursa.py` 在当前 transformers 版本下访问 `_supports_sdpa` 时的初始化期异常
 - 新增 Phase 2 对齐校验脚本：
-  - `examples/math_prm/check_phase2_alignment.py`
+  - `examples/math_prm/tools/check_phase2_alignment.py`
 - 新增 Phase 2 轻量单测：
-  - `examples/math_prm/test_phase2_alignment.py`
+  - `examples/math_prm/tools/test_phase2_alignment.py`
 - 新增单条样本 GPU 对齐结果：
   - `/data/LightRFT/tmp/ursa_stage3/phase2_alignment_smoke.json`
 
@@ -646,7 +646,7 @@ Checklist：
 - 训练入口 `train_colocate.py` 已可被直接 import，`is_ursa_model('/home/ubuntu/URSA-MATH/checkpoints/URSA-8B') == True`
 - `python -m unittest -q examples.math_prm.test_phase2_alignment`
   - 已通过（`4` 个测试）
-- `python examples/math_prm/check_phase2_alignment.py --device cuda:0`
+- `python examples/math_prm/tools/check_phase2_alignment.py --device cuda:0`
   - 已实际跑通 `URSA-RM-8B` 单条样本对齐
   - `prepared_input_match = true`
   - `reference.min = 0.87109375`
@@ -686,7 +686,7 @@ Checklist：
 按轮修复记录（2026-03-19）：
 
 - 第 1 轮 smoke：
-  - 启动脚本：`/data/LightRFT/examples/math_prm/run_phase3_smoke.sh`
+  - 启动脚本：`/data/LightRFT/examples/math_prm/tools/run_phase3_smoke.sh`
   - 训练日志：`/data/LightRFT/tmp/ursa_stage3/phase3_smoke/phase3_smoke_20260319_005513.log`
   - 结果：主链路已打通，但健康性判定失败
   - 暴露问题：
@@ -903,7 +903,7 @@ Checklist：
     - `step_score_min` / `step_score_mean` / `step_score_last` / `step_count`
 - `lightrft/trainer/ppo_trainer_vl.py`
   - rollout/eval 统计也改为透传并聚合 reward_metrics
-- `examples/math_prm/prepare_ursa_stage3_manifest.py`
+- `examples/math_prm/tools/prepare_ursa_stage3_manifest.py`
   - 默认 manifest label 已切到 `math_psgrpo`
   - 默认输出文件名也切到 `mmathcot_stage3_math_psgrpo.*`
 - `examples/math_prm/run_grpo_math_prm_ursa_8b.sh`
@@ -1077,7 +1077,7 @@ Checklist：
     - 如需先做资源 smoke，可复用：
       - `/home/ubuntu/URSA-MATH/examples/run_dataset_loading_example.py`
       - `/home/ubuntu/URSA-MATH/examples/validate_dataset_entrypoints.py`
-    - Phase 3 baseline smoke 应走 `examples/math_prm/run_phase3_smoke.sh`
+    - Phase 3 baseline smoke 应走 `examples/math_prm/tools/run_phase3_smoke.sh`
   - Table 14 对齐后的默认超参现在是：
     - `n_samples_per_prompt = 8`
     - `temperature = 1.0`
@@ -1102,7 +1102,7 @@ Checklist：
     - `init_kl_coef = 0.003`
     - `images_key = "images"`
   - 文档说明里也明确了：`rm_use_engine` 虽然仍是通用 flag，但 `math_prm/math_psgrpo` 的 URSA PRM 仍然走 HF 直连
-- `examples/math_prm/check_phase6_script_alignment.py`
+- `examples/math_prm/tools/check_phase6_script_alignment.py`
   - 新增最小对齐校验脚本
   - 直接检查 launcher 默认值、注释、关键 flag、Docker baseline 说明和 batch 实现方式是否满足 Phase 6 约束
 
@@ -1114,7 +1114,7 @@ Checklist：
 
 验证：
 
-- `python examples/math_prm/check_phase6_script_alignment.py`
+- `python examples/math_prm/tools/check_phase6_script_alignment.py`
   - 通过
 - `python -m unittest -q examples.math_prm.test_phase2_alignment`
   - 通过
@@ -1156,11 +1156,11 @@ Checklist：
   - 单独 `URSA-8B` 直接推理是十几秒量级
   - `gradient_checkpointing` 是第一主因
   - 训练态 `FSDP` actor 直接承担 rollout generate 是第二主因
-  - 新增最小测速脚本 `examples/math_prm/probe_rollout_speed_candidates.py` 已在更贴近真实 rollout 的 `16 response/rank` 场景下复现了这个结论
+  - 新增最小测速脚本 `examples/math_prm/tools/probe_rollout_speed_candidates.py` 已在更贴近真实 rollout 的 `16 response/rank` 场景下复现了这个结论
 
 本轮最终观测配置：
 
-- 入口脚本：`examples/math_prm/run_phase7_observation.sh`
+- 入口脚本：`examples/math_prm/tools/run_phase7_observation.sh`
 - 真实运行时间戳：`20260319_233851`
 - 结果目录：`results/lightrft-ursa8b-stage3-phase7-observation/lightrft-ursa8b-stage3-phase7-observation-ep1-kl0.003-lr2e-6-20260319_233851`
 - 训练日志：`/data/LightRFT/tmp/ursa_stage3/phase7_observation/phase7_observation_20260319_233851.log`
@@ -1186,18 +1186,18 @@ Checklist：
 - `lightrft/utils/math_prm_output.py`
   - 将 `math_psgrpo` 纳入 structured label
   - 补齐短代数 final answer 的 stop 判定
-- `examples/math_prm/check_hf_rollout.py`
+- `examples/math_prm/tools/check_hf_rollout.py`
   - 最小校验改成和真实 rollout 一致的 batched left-padding 直生基线
-- `examples/math_prm/test_phase2_alignment.py`
+- `examples/math_prm/tools/test_phase2_alignment.py`
   - 补齐左 padding 输出切片、`math_psgrpo` structured stop、短代数 answer stop 的回归测试
-- `examples/math_prm/run_phase7_observation.sh`
+- `examples/math_prm/tools/run_phase7_observation.sh`
   - 修复 `timeout + wait` 在 `set -e` 下无法继续分析的问题
   - 默认缺失 `math_psgrpo` manifest 时自动生成
   - 最终采用 8 卡 bounded observation，而不是 1 卡空跑配置
 - `examples/math_prm/train_colocate.py`
   - reference model 的 FSDP `shard_size` 改为按当前 `world_size` 自适应，避免小 world size 调试时直接断在 `assert world_size % shard_size == 0`
   - 补上 `--trajectory_analysis` CLI，避免 `save_trajectories()` 在保存阶段因缺少字段报错
-- `examples/math_prm/analyze_phase7_observation.py`
+- `examples/math_prm/tools/analyze_phase7_observation.py`
   - 空跑 observation 不再被误判为 healthy
   - 多模态 impact check 改为“真实图像 vs 同尺寸白图”消融，避免 `raw_images=None` 这条路径失效
 
@@ -1257,7 +1257,7 @@ Phase 7 结论：
     - `fsdp_eval_no_gc = 65.816s`
     - `raw_eval_no_gc = 44.139s`
   - 这说明当前最关键的提速杠杆不是 train/eval mode，而是 rollout 阶段必须去掉 `gradient_checkpointing`
-  - 新增脚本 `examples/math_prm/probe_rollout_speed_candidates.py` 的职责，就是在不修改现有库代码的情况下，用更接近真实 rollout 的 workload 比较这些候选运行形态
+  - 新增脚本 `examples/math_prm/tools/probe_rollout_speed_candidates.py` 的职责，就是在不修改现有库代码的情况下，用更接近真实 rollout 的 workload 比较这些候选运行形态
   - 这说明当前 rollout 的主慢点已经不再模糊，详见 `plan/PHASE7_HF_ROLLOUT_PERFORMANCE_ANALYSIS.md`
 - Phase 7 之后剩余的主问题已经切换成训练质量本身
   - 例如当前 `correctness_ratio` 仍只有 `0.25`

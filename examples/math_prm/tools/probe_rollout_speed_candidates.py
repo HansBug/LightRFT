@@ -14,10 +14,12 @@ import torch
 import torch.distributed as dist
 from PIL import Image
 
-ROOT = Path("/data/LightRFT")
-EXAMPLE_DIR = ROOT / "examples" / "math_prm"
-if str(EXAMPLE_DIR) not in sys.path:
-    sys.path.insert(0, str(EXAMPLE_DIR))
+TOOLS_DIR = Path(__file__).resolve().parent
+MATH_PRM_DIR = TOOLS_DIR.parent
+ROOT = Path(__file__).resolve().parents[3]
+for path in (TOOLS_DIR, MATH_PRM_DIR):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 from check_hf_rollout import SYSTEM_PROMPT, load_actor
 from lightrft.strategy.strategy import get_strategy
@@ -40,7 +42,7 @@ def parse_args():
         required=True,
     )
     parser.add_argument("--model-path", default="/home/ubuntu/URSA-MATH/checkpoints/URSA-8B")
-    parser.add_argument("--manifest-path", default="/data/LightRFT/tmp/ursa_stage3/mmathcot_stage3_math_psgrpo.jsonl")
+    parser.add_argument("--manifest-path", default=str(ROOT / "tmp/ursa_stage3/mmathcot_stage3_math_psgrpo.jsonl"))
     parser.add_argument("--prompt-count", type=int, default=4)
     parser.add_argument("--local-samples", type=int, default=16)
     parser.add_argument("--chunk-size", type=int, default=8)

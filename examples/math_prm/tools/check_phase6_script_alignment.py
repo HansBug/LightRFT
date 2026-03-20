@@ -7,8 +7,8 @@ This script is intentionally lightweight:
     - It verifies the Phase 6 checklist items that should remain stable.
 
 Usage:
-    python examples/math_prm/check_phase6_script_alignment.py
-    python examples/math_prm/check_phase6_script_alignment.py --output-json /tmp/report.json
+    python examples/math_prm/tools/check_phase6_script_alignment.py
+    python examples/math_prm/tools/check_phase6_script_alignment.py --output-json /tmp/report.json
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 RUN_SCRIPT_PATH = REPO_ROOT / "examples" / "math_prm" / "run_grpo_math_prm_ursa_8b.sh"
 TRAIN_SCRIPT_PATH = REPO_ROOT / "examples" / "math_prm" / "train_colocate.py"
 
@@ -151,7 +151,7 @@ def collect_phase6_alignment() -> Dict[str, Any]:
             "passed": (
                 "/home/ubuntu/URSA-MATH/examples/run_dataset_loading_example.py" in run_script_text
                 and "/home/ubuntu/URSA-MATH/examples/validate_dataset_entrypoints.py" in run_script_text
-                and "run_phase3_smoke.sh" in run_script_text
+                and "tools/run_phase3_smoke.sh" in run_script_text
             ),
             "actual": True,
             "expected": True,

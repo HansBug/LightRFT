@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "${ROOT_DIR}"
 
 TIMEOUT_MINUTES="${TIMEOUT_MINUTES:-25}"
@@ -86,7 +86,7 @@ echo "[run_phase7_observation.sh] experiment=${EXPERIMENT_NAME}"
 if [[ ! -f "${PATH_TO_YOUR_MATH_DATASET}" ]]; then
     if [[ "${PATH_TO_YOUR_MATH_DATASET}" == "/data/LightRFT/tmp/ursa_stage3/mmathcot_stage3_math_psgrpo.jsonl" ]]; then
         echo "[run_phase7_observation.sh] default math_psgrpo manifest missing, generating it now"
-        python examples/math_prm/prepare_ursa_stage3_manifest.py \
+        python examples/math_prm/tools/prepare_ursa_stage3_manifest.py \
             --output-path "${PATH_TO_YOUR_MATH_DATASET}" \
             --summary-path "/data/LightRFT/tmp/ursa_stage3/mmathcot_stage3_math_psgrpo.summary.json"
     else
@@ -119,7 +119,7 @@ fi
 echo "${LATEST_RESULT_DIR}" > "${RESULT_DIR_RECORD}"
 echo "[run_phase7_observation.sh] analyzing ${LATEST_RESULT_DIR}"
 
-python examples/math_prm/analyze_phase7_observation.py \
+python examples/math_prm/tools/analyze_phase7_observation.py \
     --results-dir "${LATEST_RESULT_DIR}" \
     --log-path "${RUN_LOG}" \
     --dataset-path "${PATH_TO_YOUR_MATH_DATASET}" \

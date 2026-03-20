@@ -173,8 +173,8 @@ output_token_ids = sequences[idx, output_start_idx:total_length].tolist()
 
 同时补了回归验证：
 
-- `/data/LightRFT/examples/math_prm/test_phase2_alignment.py`
-- `/data/LightRFT/examples/math_prm/check_hf_rollout.py`
+- `/data/LightRFT/examples/math_prm/tools/test_phase2_alignment.py`
+- `/data/LightRFT/examples/math_prm/tools/check_hf_rollout.py`
 
 ## 7. 修复后的验证结果
 
@@ -183,7 +183,7 @@ output_token_ids = sequences[idx, output_start_idx:total_length].tolist()
 命令：
 
 ```bash
-python examples/math_prm/check_hf_rollout.py \
+python examples/math_prm/tools/check_hf_rollout.py \
   --max-new-tokens 1024 \
   --output-json /data/LightRFT/tmp/ursa_stage3/hf_rollout_check_1024_batch_fix_v2.json
 ```

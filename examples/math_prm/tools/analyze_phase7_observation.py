@@ -20,10 +20,12 @@ from typing import Any, Dict, Iterable, List, Optional
 import numpy as np
 from PIL import Image
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-MATH_PRM_DIR = Path(__file__).resolve().parent
-if str(MATH_PRM_DIR) not in sys.path:
-    sys.path.insert(0, str(MATH_PRM_DIR))
+TOOLS_DIR = Path(__file__).resolve().parent
+MATH_PRM_DIR = TOOLS_DIR.parent
+REPO_ROOT = Path(__file__).resolve().parents[3]
+for path in (TOOLS_DIR, MATH_PRM_DIR):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 from lightrft.trainer.image_utils import normalize_images
 

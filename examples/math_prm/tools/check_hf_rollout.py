@@ -13,7 +13,7 @@ This script exercises the same local-HF rollout path used by LightRFT Phase 3:
 
 Usage:
 
-    python examples/math_prm/check_hf_rollout.py
+    python examples/math_prm/tools/check_hf_rollout.py
 """
 
 from __future__ import annotations
@@ -32,9 +32,11 @@ import torch.distributed as dist
 from PIL import Image
 from transformers.generation.logits_process import LogitsProcessorList
 
-CURRENT_DIR = Path(__file__).resolve().parent
-if str(CURRENT_DIR) not in sys.path:
-    sys.path.insert(0, str(CURRENT_DIR))
+TOOLS_DIR = Path(__file__).resolve().parent
+MATH_PRM_DIR = TOOLS_DIR.parent
+for path in (TOOLS_DIR, MATH_PRM_DIR):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 from lightrft.datasets.utils import zero_pad_sequences
 from lightrft.strategy import StrategyBase
