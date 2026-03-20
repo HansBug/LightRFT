@@ -1156,6 +1156,7 @@ Checklist：
   - 单独 `URSA-8B` 直接推理是十几秒量级
   - `gradient_checkpointing` 是第一主因
   - 训练态 `FSDP` actor 直接承担 rollout generate 是第二主因
+  - 新增最小测速脚本 `examples/math_prm/probe_rollout_speed_candidates.py` 已在更贴近真实 rollout 的 `16 response/rank` 场景下复现了这个结论
 
 本轮最终观测配置：
 
@@ -1250,6 +1251,13 @@ Phase 7 结论：
     - `raw + train + gc on` 会从 `14.604s` 掉到 `306.014s`
     - `FSDP + gc off` 是 `32.977s`
     - `FSDP + gc on` 是 `254.804s`
+  - 随后的更贴近真实 rollout 的 probe 进一步说明：
+    - `fsdp_train_gc = 683.406s`
+    - `fsdp_train_no_gc = 68.869s`
+    - `fsdp_eval_no_gc = 65.816s`
+    - `raw_eval_no_gc = 44.139s`
+  - 这说明当前最关键的提速杠杆不是 train/eval mode，而是 rollout 阶段必须去掉 `gradient_checkpointing`
+  - 新增脚本 `examples/math_prm/probe_rollout_speed_candidates.py` 的职责，就是在不修改现有库代码的情况下，用更接近真实 rollout 的 workload 比较这些候选运行形态
   - 这说明当前 rollout 的主慢点已经不再模糊，详见 `plan/PHASE7_HF_ROLLOUT_PERFORMANCE_ANALYSIS.md`
 - Phase 7 之后剩余的主问题已经切换成训练质量本身
   - 例如当前 `correctness_ratio` 仍只有 `0.25`

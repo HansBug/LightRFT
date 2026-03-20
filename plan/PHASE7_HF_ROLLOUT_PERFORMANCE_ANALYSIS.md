@@ -27,6 +27,10 @@
   - `gradient_checkpointing` 会把 decode 直接拖慢一个数量级
   - `FSDP` 会继续增加额外开销
   - 当前 rollout 的主问题已经基本定位到“训练态 actor 的 decode 形态”，不是模型本体速度
+- `2026-03-20` 随后又新增了一个更贴近真实 Stage 3 rollout 的最小测速脚本：
+  - `examples/math_prm/probe_rollout_speed_candidates.py`
+  - 它用 `8` 卡、每个 rank `16` 条 response、`chunk_size=8` 来模拟当前本地 `hf` rollout 的核心 decode 形态
+  - 这轮结果进一步证明：最关键的提速杠杆不是 train/eval mode，而是 rollout 阶段必须去掉 `gradient_checkpointing`
 
 ## 2. 证据：时间主要耗在 generate
 
@@ -220,6 +224,75 @@
 - 不是 URSA 模型本身慢
 - 不是 PPO train 慢
 - 也不是 reward model 慢
+
+## 3.2.1 新增 probe 脚本：更贴近真实 rollout 的 16-response/rank 近似实验
+
+为了避免只停留在“小 batch 控制实验”，我新增了：
+
+- `/data/LightRFT/examples/math_prm/probe_rollout_speed_candidates.py`
+
+这个脚本不是训练脚本，也不是库代码修改；它的职责是：
+
+- 不修改现有 `lightrft/` 主链
+- 直接复用当前 URSA 运行时和 LightRFT actor 包装
+- 用更接近真实 rollout 的工作量去测：
+  - `8` 卡
+  - 每个 rank `16` 条 response
+  - `chunk_size=8`
+  - `max_new_tokens=1024`
+- 把几种最关键的运行形态并排对比：
+  - `fsdp_train_gc`
+  - `fsdp_train_no_gc`
+  - `fsdp_eval_no_gc`
+  - `raw_eval_no_gc`
+
+也就是说，这个脚本的目的不是“再写一套训练代码”，而是：
+
+- 用最小代价回答“如果不改库，只改变 rollout 运行形态，速度能拉回多少”
+
+### 这轮 probe 的实测结果
+
+结果文件在：
+
+- `/data/LightRFT/tmp/ursa_stage3/rollout_speed_probe/fsdp_train_gc.json`
+- `/data/LightRFT/tmp/ursa_stage3/rollout_speed_probe/fsdp_train_no_gc.json`
+- `/data/LightRFT/tmp/ursa_stage3/rollout_speed_probe/fsdp_eval_no_gc.json`
+- `/data/LightRFT/tmp/ursa_stage3/rollout_speed_probe/raw_eval_no_gc.json`
+
+按“更像真实 rollout”的口径，结果是：
+
+- `fsdp_train_gc`
+  - `time_sec = 683.406`
+  - `generated_tokens_mean = 154.625`
+  - `tokens_per_sec = 3.62`
+- `fsdp_train_no_gc`
+  - `time_sec = 68.869`
+  - `generated_tokens_mean = 142.562`
+  - `tokens_per_sec = 33.121`
+- `fsdp_eval_no_gc`
+  - `time_sec = 65.816`
+  - `generated_tokens_mean = 142.562`
+  - `tokens_per_sec = 34.657`
+- `raw_eval_no_gc`
+  - `time_sec = 44.139`
+  - `generated_tokens_mean = 150.625`
+  - `tokens_per_sec = 54.6`
+
+### 这轮 probe 新增说明了什么
+
+- `fsdp_train_gc = 683.406s` 已经非常贴近真实 Phase 7 里 `661.9063s` / `802.7335s` 的慢法
+- 只要把 `gradient_checkpointing` 从 rollout decode 阶段拿掉，`FSDP` actor 也能从 `683.406s` 直接掉到 `68.869s`
+- 这个改善接近 `10x`
+- `train` 和 `eval` 本身差异很小：
+  - `68.869s -> 65.816s`
+  - 说明它们不是主矛盾
+- 如果进一步改成“每卡完整 URSA 推理副本”，还能从 `65.816s` 再降到 `44.139s`
+  - 但这部分收益只有约 `1.49x`
+
+因此，这轮 probe 把优先级进一步压实成了：
+
+1. rollout 阶段先去掉 `gradient_checkpointing`
+2. 再决定是否值得为了额外 `1.5x` 左右收益去上更重的“独立推理副本”方案
 
 ## 3.3 小批对照：训练态 + gradient checkpointing 确实会变慢，但仍不该慢到小时级
 
