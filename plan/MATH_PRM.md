@@ -1152,6 +1152,10 @@ Checklist：
 - 之前的格式稳定性问题已定位并修复，根因详见 `plan/PHASE7_FORMAT_STABILITY_ANALYSIS.md`
 - 当前仍有一个独立保留问题：本地 `hf` 多模态 rollout 速度明显偏慢，但已不再阻塞 bounded run 完成
 - 推理性能拆解详见 `plan/PHASE7_HF_ROLLOUT_PERFORMANCE_ANALYSIS.md`
+- 截至 `2026-03-20`，性能问题已进一步缩小到“训练态 actor 的 decode 形态”：
+  - 单独 `URSA-8B` 直接推理是十几秒量级
+  - `gradient_checkpointing` 是第一主因
+  - 训练态 `FSDP` actor 直接承担 rollout generate 是第二主因
 
 本轮最终观测配置：
 
@@ -1241,6 +1245,12 @@ Phase 7 结论：
 - Phase 7 同时也保留了一个需要后续单独处理的问题：
   - `hf` 多模态 rollout 仍然偏慢
   - 当前虽然已经不再超时，但单轮 `rollout engine generation time` 仍在 `661.9063s` 量级
+  - `2026-03-20` 的 4 组最小化对照已经说明：
+    - 单独 `URSA-8B` 本身不慢
+    - `raw + train + gc on` 会从 `14.604s` 掉到 `306.014s`
+    - `FSDP + gc off` 是 `32.977s`
+    - `FSDP + gc on` 是 `254.804s`
+  - 这说明当前 rollout 的主慢点已经不再模糊，详见 `plan/PHASE7_HF_ROLLOUT_PERFORMANCE_ANALYSIS.md`
 - Phase 7 之后剩余的主问题已经切换成训练质量本身
   - 例如当前 `correctness_ratio` 仍只有 `0.25`
   - 以及 rollout 性能问题

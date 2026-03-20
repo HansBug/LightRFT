@@ -22,6 +22,11 @@
   - 本地 `hf` rollout 直接复用 FSDP 分片训练 actor
   - rollout 期间仍带着训练态的 `gradient_checkpointing`
   - 运行时日志已经明确显示 KV cache 实际被关掉
+- `2026-03-20` 新增的 4 组最小化对照已经把范围进一步缩小：
+  - 单独 `URSA-8B` 并不慢
+  - `gradient_checkpointing` 会把 decode 直接拖慢一个数量级
+  - `FSDP` 会继续增加额外开销
+  - 当前 rollout 的主问题已经基本定位到“训练态 actor 的 decode 形态”，不是模型本体速度
 
 ## 2. 证据：时间主要耗在 generate
 
@@ -136,7 +141,87 @@
 
 因此，当前 rollout 的慢，不能用“URSA 本来就慢”来解释。
 
-## 3.2 小批对照：训练态 + gradient checkpointing 确实会变慢，但仍不该慢到小时级
+## 3.2 四组最小化对照：主慢点已经缩到训练态 decode
+
+为了把“到底是哪一层慢”彻底拆开，我补跑了 4 组和真实 Stage 3 workload 参数尽量对齐的最小化对照。统一条件是：
+
+- 同一批 `math_psgrpo` 多模态样本
+- 同一套 Stage 3 system prompt
+- `batch_size = 8`
+- `max_new_tokens = 1024`
+- `temperature = 1.0`
+- `top_p = 1.0`
+- `repetition_penalty = 1.05`
+- `no_repeat_ngram_size = 4`
+
+结果如下：
+
+### 对照 A：raw URSA，单卡，`eval + gc off`
+
+- `time_sec = 14.604`
+- `generated_tokens_mean = 144.5`
+- `generated_tokens_max = 308`
+- `tokens_per_sec = 79.155`
+- `peak_mem_gb = 24.77`
+
+### 对照 B：raw URSA，单卡，`train + gc on`
+
+- `time_sec = 306.014`
+- `generated_tokens_mean = 154.5`
+- `generated_tokens_max = 328`
+- `tokens_per_sec = 4.039`
+- `peak_mem_gb = 24.80`
+
+说明：
+
+- 仅仅把单独 URSA 切到 `train + gradient_checkpointing`，就会从 `14.6s` 直接掉到 `306.0s`
+- slowdown 大约是 `20.95x`
+- 这一步本身已经足以说明：`gradient_checkpointing -> cache 失效` 是主杀伤项之一
+
+### 对照 C：LightRFT actor，8 卡最小分布式，`FSDP + gc off`
+
+- `time_sec = 32.977`
+- `generated_tokens_mean = 110.375`
+- `generated_tokens_max = 233`
+- `tokens_per_sec = 26.776`
+- `peak_mem_gb = 15.39`
+
+说明：
+
+- 单独 `FSDP` 也会变慢，但量级远小于 `gc`
+- 相比最干净的 raw baseline，slowdown 大约是 `2.26x`
+
+### 对照 D：LightRFT actor，8 卡最小分布式，`FSDP + gc on`
+
+- `time_sec = 254.804`
+- `generated_tokens_mean = 116.75`
+- `generated_tokens_max = 261`
+- `tokens_per_sec = 3.666`
+- `peak_mem_gb = 15.42`
+
+说明：
+
+- 这是最接近当前真实 rollout 的最小可复现实验
+- 结果已经直接落到了 `4` 分多钟量级
+- 吞吐只有 `3.666 tok/s`
+- 这和真实训练里“第一个 global step generate 直接十几分钟”的方向已经一致
+
+### 这 4 组对照给出的结论
+
+- 单独 `URSA-8B` 本身速度正常，十几秒量级
+- `gradient_checkpointing` 是第一主因
+- `FSDP` 是第二主因
+- 两者叠加后，已经能把最小 rollout 近似场景拖到几分钟量级
+- 真实训练里更夸张的 `802.7s / 3895.6s`，更像是在这个错误慢基线上又叠加了 batch 组织、同步和 straggler 问题
+
+因此，现在可以比之前更明确地说：
+
+- rollout 主问题已经基本缩到“训练态 actor 的 decode 形态”
+- 不是 URSA 模型本身慢
+- 不是 PPO train 慢
+- 也不是 reward model 慢
+
+## 3.3 小批对照：训练态 + gradient checkpointing 确实会变慢，但仍不该慢到小时级
 
 我还做了一个更小的控制实验，只看两条真实样本、`max_new_tokens=256`，比较训练态和 `gradient_checkpointing` 的影响：
 
@@ -434,18 +519,17 @@
 - 目的：
   - 建立最干净的单独推理基线
 - 当前状态：
-  - 已部分完成，见上面的直接基线
-- 待补字段：
-  - `batch_size=8` 重复测 `N` 次后的均值 / 方差
-  - `batch_size=16` 重复测 `N` 次后的均值 / 方差
-  - `tokens/s`
+  - 已完成
+- 已知结果：
+  - `batch_size=8`: `14.604s`
+  - `tokens/s=79.155`
 
 ### 对照 B：raw URSA，单卡，`train + gc off`
 
 - 目的：
   - 分离 “train mode 本身” 和 “gradient checkpointing” 的影响
 - 当前状态：
-  - 待补
+  - 仍待补
 - 待补字段：
   - `batch_size=8` 时间
   - `tokens/s`
@@ -456,34 +540,33 @@
 - 目的：
   - 量化 `gradient_checkpointing -> cache 失效` 带来的直接损耗
 - 当前状态：
-  - 已做过小批控制实验，确认会明显变慢
-  - 但还缺和当前 Stage 3 workload 更接近的稳定基线
-- 待补字段：
-  - `batch_size=8` 时间
-  - `tokens/s`
-  - 与对照 A / B 的倍率
+  - 已完成
+- 已知结果：
+  - `batch_size=8`: `306.014s`
+  - `tokens/s=4.039`
+  - 与对照 A 相比约 `20.95x` slowdown
 
-### 对照 D：LightRFT actor，单卡或最小分布式，`FSDP + gc off`
+### 对照 D：LightRFT actor，8 卡最小分布式，`FSDP + gc off`
 
 - 目的：
   - 单独看 FSDP 分片训练 actor 做 rollout 时的额外损耗
 - 当前状态：
-  - 待补
-- 待补字段：
-  - `batch_size=8` 时间
-  - `tokens/s`
-  - 与 raw URSA 的倍率
+  - 已完成
+- 已知结果：
+  - `batch_size=8`: `32.977s`
+  - `tokens/s=26.776`
+  - 与对照 A 相比约 `2.26x` slowdown
 
-### 对照 E：LightRFT actor，单卡或最小分布式，`FSDP + gc on`
+### 对照 E：LightRFT actor，8 卡最小分布式，`FSDP + gc on`
 
 - 目的：
   - 复现最接近当前真实 rollout 的最小慢路径
 - 当前状态：
-  - 待补
-- 待补字段：
-  - `batch_size=8` 时间
-  - `tokens/s`
-  - 与当前真实训练日志是否同量级
+  - 已完成
+- 已知结果：
+  - `batch_size=8`: `254.804s`
+  - `tokens/s=3.666`
+  - 已经落入“几分钟级 rollout”区间
 
 ### 对照 F：真实 rollout 8 卡长跑，首个 `global step`
 
@@ -505,6 +588,10 @@
 - 当前性能问题是真实存在的
 - 当前 slowdown 并不能用“URSA 本来就慢”来解释
 - 当前一个 `global step` 跑到十几分钟乃至一小时，**不正常**
+- 当前第一主因已经基本确定为：
+  - `gradient_checkpointing` 让 decode 路径失去 KV cache
+- 当前第二主因是：
+  - 训练态 FSDP actor 直接承担 rollout generate
 - 如果只是为了继续推进后续 phase，可以先接受当前速度做短时观测
 - 但如果目标是“把 Stage 3 训练做成长期高效可重复跑的方案”，这个问题迟早还得处理
 
