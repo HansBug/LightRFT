@@ -63,7 +63,21 @@ DOCKER_BASELINE="${DOCKER_BASELINE:-/data/LightRFT/Dockerfile}"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-lightrft-ursa8b-stage3-psgrpo}"
 
 # --- W&B ---
-export WANDB_API_KEY="${WANDB_API_KEY:-}"
+# To avoid touching any system-level wandb login state, this script supports a
+# run-scoped API key via LIGHTRFT_WANDB_API_KEY. When provided, it is exported
+# only for the current process tree and never written into the traced torchrun
+# command line.
+LIGHTRFT_WANDB_API_KEY="${LIGHTRFT_WANDB_API_KEY:-}"
+WANDB_KEY_SOURCE="disabled"
+if [[ -n "${LIGHTRFT_WANDB_API_KEY}" ]]; then
+    export WANDB_API_KEY="${LIGHTRFT_WANDB_API_KEY}"
+    WANDB_KEY_SOURCE="LIGHTRFT_WANDB_API_KEY"
+else
+    export WANDB_API_KEY="${WANDB_API_KEY:-}"
+    if [[ -n "${WANDB_API_KEY}" ]]; then
+        WANDB_KEY_SOURCE="WANDB_API_KEY"
+    fi
+fi
 export WANDB_PROJECT="${WANDB_PROJECT:-LightRFT-URSA8B-Stage3}"
 
 
@@ -123,8 +137,10 @@ export GPUS_PER_NODE=$MLP_WORKER_GPU
 ENGINE_TYPE="${ENGINE_TYPE:-hf}"
 if [[ "${ENGINE_TYPE}" == "hf" ]]; then
     ENGINE_TP="${ENGINE_TP:-1}"
+    LOCAL_HF_GENERATE_MAX_BATCH_SIZE="${LOCAL_HF_GENERATE_MAX_BATCH_SIZE:-4}"
 else
     ENGINE_TP="${ENGINE_TP:-2}"
+    LOCAL_HF_GENERATE_MAX_BATCH_SIZE="${LOCAL_HF_GENERATE_MAX_BATCH_SIZE:-0}"
 fi
 EVAL_SPLIT="${EVAL_SPLIT:-}"
 USE_URSA_ENGINE_WRAPPER="${USE_URSA_ENGINE_WRAPPER:-1}"
@@ -163,6 +179,7 @@ export LR
 export PROMPT_MAX_LEN
 export GENERATE_MAX_LEN
 export ENGINE_TYPE
+export LOCAL_HF_GENERATE_MAX_BATCH_SIZE
 export NUM_TRAJECTORIES_TO_SAVE
 
 python - <<'PY'
@@ -268,10 +285,11 @@ REWARD_PRETRAIN_PATHS="{\"math_prm\":\"${PATH_TO_URSA_RM}\"}"
 WANDB_ARGS=()
 if [[ -n "${WANDB_API_KEY}" && "${WANDB_API_KEY}" != "YOUR_WANDB_API_KEY" ]]; then
     WANDB_ARGS=(
-        --use_wandb "${WANDB_API_KEY}"
+        --use_wandb "__env__"
         --wandb_project "${WANDB_PROJECT}"
         --wandb_run_name "${WANDB_RUN_NAME}"
     )
+    echo "[run_grpo_math_prm_ursa_8b.sh] WANDB enabled for this run via ${WANDB_KEY_SOURCE}."
 else
     echo "[run_grpo_math_prm_ursa_8b.sh] WANDB disabled for this run."
 fi
@@ -354,6 +372,7 @@ torchrun \
     --engine_type "${ENGINE_TYPE}" \
     --engine_mem_util 0.6 \
     --engine_tp_size $ENGINE_TP \
+    --local_hf_generate_max_batch_size ${LOCAL_HF_GENERATE_MAX_BATCH_SIZE} \
     --enable_engine_sleep \
     --system_prompt "${SYSTEM_PROMPT}" \
     --l2 1.0e-2 \

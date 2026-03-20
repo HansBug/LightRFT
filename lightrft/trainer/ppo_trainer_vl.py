@@ -365,9 +365,14 @@ class PPOTrainerVL(ABC):
                     rand_prompts, rand_images, rand_references, rand_labels = batch
                     rand_videos = None
 
-                # TODO: Remove debug print
+                batch_preview = min(2, len(rand_prompts))
                 self.strategy.print(
-                    f"rand_prompts:\n {rand_prompts}\n , rand_images:{rand_images}\n , rand_references:{rand_references}\n, rand_labels:{rand_labels}\n "  # noqa
+                    "collect phase batch summary: "
+                    f"batch_size={len(rand_prompts)}, "
+                    f"preview_prompts={rand_prompts[:batch_preview]}, "
+                    f"preview_images={rand_images[:batch_preview]}, "
+                    f"preview_references={rand_references[:batch_preview]}, "
+                    f"preview_labels={rand_labels[:batch_preview]}"
                 )
 
                 for i, experience in enumerate(

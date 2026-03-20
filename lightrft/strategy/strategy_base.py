@@ -902,18 +902,13 @@ class StrategyBase(ABC):
             if eos_token_id is None:
                 raise ValueError("Unable to resolve eos_token_id for local HF inference engine.")
 
-            prompt_tensors = []
             normalized_prompt_ids = []
             for token_ids in prompt_token_ids:
                 if isinstance(token_ids, torch.Tensor):
                     token_ids = token_ids.tolist()
                 normalized_prompt_ids.append(token_ids)
-                prompt_tensors.append(torch.tensor(token_ids, dtype=torch.long))
 
             device = torch.cuda.current_device()
-            padded_input_ids = zero_pad_sequences(prompt_tensors, side="left", value=pad_token_id).to(device)
-            attention_mask = padded_input_ids.ne(pad_token_id).long()
-            prompt_lengths = attention_mask.sum(dim=1).detach().cpu()
 
             def _prepare_tensor(tensor):
                 if tensor is None:
@@ -927,55 +922,115 @@ class StrategyBase(ABC):
                 top_k = None
             temperature = sampling_params.get("temperature", 1.0)
             do_sample = sampling_params.get("do_sample", temperature is None or temperature > 0)
-            logits_processor = None
-            if sampling_params.get("structured_answer_stop", False):
-                logits_processor = LogitsProcessorList(
-                    [
-                        _StructuredAnswerEosLogitsProcessor(
-                            self.inference_tokenizer,
-                            padded_input_ids.size(1),
-                            eos_token_id,
-                        )
-                    ]
-                )
+            structured_answer_stop = sampling_params.get("structured_answer_stop", False)
 
-            with torch.no_grad():
-                sequences, attention_mask_out, _ = self.inference_engine.generate(
-                    input_ids=padded_input_ids,
-                    attention_mask=attention_mask,
-                    pixel_values=_prepare_tensor(pixel_values),
-                    image_grid_thw=_prepare_tensor(image_grid_thw),
-                    pixel_values_videos=_prepare_tensor(pixel_values_videos),
-                    video_grid_thw=_prepare_tensor(video_grid_thw),
-                    logits_processor=logits_processor,
-                    top_k=top_k,
-                    top_p=sampling_params.get("top_p", 1.0),
-                    temperature=temperature,
-                    do_sample=do_sample,
-                    max_new_tokens=sampling_params.get("max_new_tokens", 1024),
-                    min_new_tokens=sampling_params.get("min_new_tokens", 1),
-                    repetition_penalty=sampling_params.get("repetition_penalty", 1.0),
-                    no_repeat_ngram_size=sampling_params.get("no_repeat_ngram_size", 0),
-                    eos_token_id=eos_token_id,
-                    pad_token_id=pad_token_id,
-                )
+            def _run_local_hf_batch(
+                batch_prompt_token_ids,
+                batch_pixel_values=None,
+                batch_image_grid_thw=None,
+                batch_pixel_values_videos=None,
+                batch_video_grid_thw=None,
+            ):
+                prompt_tensors = [torch.tensor(token_ids, dtype=torch.long) for token_ids in batch_prompt_token_ids]
+                padded_input_ids = zero_pad_sequences(prompt_tensors, side="left", value=pad_token_id).to(device)
+                attention_mask = padded_input_ids.ne(pad_token_id).long()
+                prompt_lengths = attention_mask.sum(dim=1).detach().cpu()
 
-            output_start_idx = padded_input_ids.size(1)
-            sequences = sequences.detach().cpu()
-            attention_mask_out = attention_mask_out.detach().cpu()
-
-            engine_outputs = []
-            for idx in range(sequences.size(0)):
-                total_length = int(attention_mask_out[idx].sum().item())
-                generated_length = max(total_length - int(prompt_lengths[idx].item()), 0)
-                output_end_idx = output_start_idx + generated_length
-                engine_outputs.append(
-                    EasyDict(
-                        prompt_token_ids=normalized_prompt_ids[idx],
-                        output_token_ids=sequences[idx, output_start_idx:output_end_idx].tolist(),
+                logits_processor = None
+                if structured_answer_stop:
+                    logits_processor = LogitsProcessorList(
+                        [
+                            _StructuredAnswerEosLogitsProcessor(
+                                self.inference_tokenizer,
+                                padded_input_ids.size(1),
+                                eos_token_id,
+                            )
+                        ]
                     )
-                )
-            return engine_outputs
+
+                with torch.no_grad():
+                    sequences, attention_mask_out, _ = self.inference_engine.generate(
+                        input_ids=padded_input_ids,
+                        attention_mask=attention_mask,
+                        pixel_values=_prepare_tensor(batch_pixel_values),
+                        image_grid_thw=_prepare_tensor(batch_image_grid_thw),
+                        pixel_values_videos=_prepare_tensor(batch_pixel_values_videos),
+                        video_grid_thw=_prepare_tensor(batch_video_grid_thw),
+                        logits_processor=logits_processor,
+                        top_k=top_k,
+                        top_p=sampling_params.get("top_p", 1.0),
+                        temperature=temperature,
+                        do_sample=do_sample,
+                        max_new_tokens=sampling_params.get("max_new_tokens", 1024),
+                        min_new_tokens=sampling_params.get("min_new_tokens", 1),
+                        repetition_penalty=sampling_params.get("repetition_penalty", 1.0),
+                        no_repeat_ngram_size=sampling_params.get("no_repeat_ngram_size", 0),
+                        eos_token_id=eos_token_id,
+                        pad_token_id=pad_token_id,
+                    )
+
+                output_start_idx = padded_input_ids.size(1)
+                sequences = sequences.detach().cpu()
+                attention_mask_out = attention_mask_out.detach().cpu()
+
+                batch_outputs = []
+                for idx in range(sequences.size(0)):
+                    total_length = int(attention_mask_out[idx].sum().item())
+                    generated_length = max(total_length - int(prompt_lengths[idx].item()), 0)
+                    output_end_idx = output_start_idx + generated_length
+                    batch_outputs.append(
+                        EasyDict(
+                            prompt_token_ids=batch_prompt_token_ids[idx],
+                            output_token_ids=sequences[idx, output_start_idx:output_end_idx].tolist(),
+                        )
+                    )
+                return batch_outputs
+
+            max_batch_size = max(int(getattr(self.config, "local_hf_generate_max_batch_size", 0) or 0), 0)
+            if max_batch_size > 0 and len(normalized_prompt_ids) > max_batch_size:
+                images_prefix = None
+                if images_num is not None:
+                    images_prefix = [0]
+                    for num in images_num:
+                        images_prefix.append(images_prefix[-1] + num)
+                videos_prefix = None
+                if videos_num is not None:
+                    videos_prefix = [0]
+                    for num in videos_num:
+                        videos_prefix.append(videos_prefix[-1] + num)
+
+                def _slice_modal_tensor(tensor, offsets, start, end):
+                    if tensor is None:
+                        return None
+                    if not isinstance(tensor, torch.Tensor):
+                        return tensor
+                    if tensor.numel() == 0:
+                        return tensor
+                    if offsets is not None:
+                        return tensor[offsets[start]:offsets[end]]
+                    return tensor[start:end]
+
+                engine_outputs = []
+                for start in range(0, len(normalized_prompt_ids), max_batch_size):
+                    end = min(start + max_batch_size, len(normalized_prompt_ids))
+                    engine_outputs.extend(
+                        _run_local_hf_batch(
+                            normalized_prompt_ids[start:end],
+                            batch_pixel_values=_slice_modal_tensor(pixel_values, images_prefix, start, end),
+                            batch_image_grid_thw=_slice_modal_tensor(image_grid_thw, images_prefix, start, end),
+                            batch_pixel_values_videos=_slice_modal_tensor(pixel_values_videos, videos_prefix, start, end),
+                            batch_video_grid_thw=_slice_modal_tensor(video_grid_thw, videos_prefix, start, end),
+                        )
+                    )
+                return engine_outputs
+
+            return _run_local_hf_batch(
+                normalized_prompt_ids,
+                batch_pixel_values=pixel_values,
+                batch_image_grid_thw=image_grid_thw,
+                batch_pixel_values_videos=pixel_values_videos,
+                batch_video_grid_thw=video_grid_thw,
+            )
         else:
             raise ValueError(f"Unsupported engine type: {self.inference_engine_type}")
 

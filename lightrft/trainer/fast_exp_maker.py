@@ -291,6 +291,7 @@ class MultimodalDataProcessor:
             processor_kwargs = {
                 "text": all_prompts_multimodal.copy(),
                 "add_special_tokens": False,
+                "padding": True,
                 "max_length": self.prompt_max_len,
                 "truncation": True,
                 "return_tensors": "pt",

@@ -21,6 +21,7 @@ from check_phase6_script_alignment import collect_phase6_alignment
 from train_colocate import resolve_reference_shard_size
 from lightrft.models.actor_vl import ActorVL
 from lightrft.strategy.strategy_base import StrategyBase
+from lightrft.trainer.fast_exp_maker import MultimodalDataProcessor
 from lightrft.utils.math_prm_output import (
     is_math_prm_structured_label,
     sanitize_math_prm_response_text,
@@ -163,6 +164,23 @@ class FakeMultiStepRewardModel(torch.nn.Module):
         for position, score in zip(step_positions, self.step_scores):
             logits[0, position, 0] = torch.logit(score, eps=1e-6)
         return SimpleNamespace(logits=logits)
+
+
+class FakePaddingAwareMultimodalProcessor:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        if kwargs.get("return_tensors") == "pt" and kwargs.get("padding") is not True:
+            raise AssertionError("Multimodal processor must receive padding=True for tensorized batches")
+        return FakeBatch(
+            {
+                "input_ids": torch.tensor([[11, 12, 0], [21, 22, 23]], dtype=torch.long),
+                "attention_mask": torch.tensor([[1, 1, 0], [1, 1, 1]], dtype=torch.long),
+                "pixel_values": torch.ones((2, 3, 2, 2), dtype=torch.float32),
+            }
+        )
 
 
 class FakeStrategy:
@@ -537,12 +555,32 @@ class Phase2AlignmentTests(unittest.TestCase):
         self.assertTrue(is_math_prm_structured_label("math_psgrpo"))
         self.assertTrue(is_math_prm_structured_label("MATH_PSGRPO"))
 
+    def test_multimodal_processor_uses_padding_for_tensorized_ursa_batches(self):
+        processor = FakePaddingAwareMultimodalProcessor()
+        multimodal = MultimodalDataProcessor(tokenizer=FakeTokenizer(), processor=processor, prompt_max_len=256)
+
+        batch = multimodal.process_multimodal_batch(
+            all_prompts=["short prompt", "a much longer prompt that should force different token lengths"],
+            all_images=[["img-1"], ["img-2"]],
+            all_references=["A", "B"],
+            images_num=[1, 1],
+            n_samples_per_prompt=1,
+            all_videos=None,
+            videos_num=None,
+        )
+
+        self.assertEqual(len(processor.calls), 1)
+        self.assertTrue(processor.calls[0]["padding"])
+        self.assertEqual(len(batch.all_prompt_token_ids), 2)
+        self.assertEqual(tuple(batch.all_images_pixel_values.shape), (2, 3, 2, 2))
+
     def test_hf_ursa_multimodal_generation_preserves_outputs_for_left_padded_rows(self):
         fake_actor = FakeHFGenerateActor(generated_tokens=[[91, 92, 93], [81, 82, 83]])
         fake_strategy = SimpleNamespace(
             inference_engine_type="hf",
             inference_engine=fake_actor,
             inference_tokenizer=FakeHFGenerateTokenizer(),
+            config=SimpleNamespace(local_hf_generate_max_batch_size=0),
             print=lambda *_args, **_kwargs: None,
         )
         fake_strategy.engine_generate_local = lambda **kwargs: StrategyBase.engine_generate_local(fake_strategy, **kwargs)
@@ -566,6 +604,34 @@ class Phase2AlignmentTests(unittest.TestCase):
         self.assertEqual(outputs[1].prompt_token_ids, [21, 22, 23, 24])
         self.assertEqual(outputs[0].output_token_ids, [91, 92, 93])
         self.assertEqual(outputs[1].output_token_ids, [81, 82, 83])
+
+    def test_hf_ursa_multimodal_generation_can_chunk_local_hf_batches(self):
+        fake_actor = FakeHFGenerateActor()
+        fake_strategy = SimpleNamespace(
+            inference_engine_type="hf",
+            inference_engine=fake_actor,
+            inference_tokenizer=FakeHFGenerateTokenizer(),
+            config=SimpleNamespace(local_hf_generate_max_batch_size=1),
+            print=lambda *_args, **_kwargs: None,
+        )
+        fake_strategy.engine_generate_local = lambda **kwargs: StrategyBase.engine_generate_local(fake_strategy, **kwargs)
+
+        pixel_values = torch.randn(3, 3, 4, 4, dtype=torch.float32)
+        image_grid_thw = torch.tensor([[1, 2, 2], [1, 2, 2], [1, 2, 2]], dtype=torch.long)
+
+        outputs = StrategyBase.engine_generate_local(
+            fake_strategy,
+            sampling_params={"max_new_tokens": 8, "do_sample": False, "structured_answer_stop": False},
+            prompt_token_ids=[[11, 12], [21, 22, 23], [31, 32, 33, 34]],
+            pixel_values=pixel_values,
+            image_grid_thw=image_grid_thw,
+            images_num=[1, 1, 1],
+        )
+
+        self.assertEqual([output.output_token_ids for output in outputs], [[7], [7], [7]])
+        self.assertEqual(len(fake_actor.calls), 3)
+        self.assertEqual([call["batch_size"] for call in fake_actor.calls], [1, 1, 1])
+        self.assertTrue(all(call["pixel_values_shape"] == (1, 3, 4, 4) for call in fake_actor.calls))
 
     def test_math_prm_psgrpo_metrics_reward_mapping_matches_phase4(self):
         reward = _minimal_math_prm_instance()
