@@ -40,7 +40,7 @@ from lightrft.strategy.utils.parallel_utils import (
 )
 from lightrft.strategy.utils.statistic import GenLenAnalyser
 from lightrft.strategy.config import StrategyConfig
-from lightrft.utils.math_prm_output import should_stop_math_prm_response_text
+from lightrft.utils.math_prm_output import MATH_PRM_ANSWER_MARKER, should_stop_math_prm_response_text
 from .sglang_utils import get_sglang_engine_for_rollout
 
 ModelOptimPair = Tuple[nn.Module, Optimizer]
@@ -64,18 +64,50 @@ class _StructuredAnswerEosLogitsProcessor(LogitsProcessor):
         self.tokenizer = tokenizer
         self.prompt_length = int(prompt_length)
         self.eos_token_id = int(eos_token_id)
+        self.check_interval = 4
+        self.marker_scan_max_tokens = 192
+        self.answer_tail_max_tokens = 128
+        self._marker_seen = None
+
+    def _ensure_state(self, batch_size: int) -> None:
+        if self._marker_seen is None or len(self._marker_seen) != batch_size:
+            self._marker_seen = [False] * batch_size
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
         if input_ids.size(1) <= self.prompt_length:
             return scores
 
-        generated_ids = input_ids[:, self.prompt_length:].detach().cpu()
-        decoded_rows = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=False)
-        stop_mask = torch.tensor(
-            [should_stop_math_prm_response_text(text) for text in decoded_rows],
-            device=scores.device,
-            dtype=torch.bool,
-        )
+        generated_length = input_ids.size(1) - self.prompt_length
+        if generated_length % self.check_interval != 0:
+            return scores
+
+        batch_size = input_ids.size(0)
+        self._ensure_state(batch_size)
+
+        stop_mask = torch.zeros(batch_size, device=scores.device, dtype=torch.bool)
+
+        unresolved_rows = [idx for idx, marker_seen in enumerate(self._marker_seen) if not marker_seen]
+        if unresolved_rows:
+            scan_start = max(self.prompt_length, input_ids.size(1) - self.marker_scan_max_tokens)
+            scan_ids = input_ids[unresolved_rows, scan_start:].detach().cpu()
+            scan_texts = self.tokenizer.batch_decode(scan_ids, skip_special_tokens=False)
+            for row_idx, text in zip(unresolved_rows, scan_texts):
+                if MATH_PRM_ANSWER_MARKER in text:
+                    self._marker_seen[row_idx] = True
+                    if should_stop_math_prm_response_text(text):
+                        stop_mask[row_idx] = True
+
+        marker_rows = [
+            idx for idx, marker_seen in enumerate(self._marker_seen) if marker_seen and not bool(stop_mask[idx].item())
+        ]
+        if marker_rows:
+            tail_start = max(self.prompt_length, input_ids.size(1) - self.answer_tail_max_tokens)
+            tail_ids = input_ids[marker_rows, tail_start:].detach().cpu()
+            tail_texts = self.tokenizer.batch_decode(tail_ids, skip_special_tokens=False)
+            for row_idx, text in zip(marker_rows, tail_texts):
+                if should_stop_math_prm_response_text(text):
+                    stop_mask[row_idx] = True
+
         if not torch.any(stop_mask):
             return scores
 
