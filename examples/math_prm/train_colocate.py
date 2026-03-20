@@ -145,6 +145,36 @@ def load_actor_tokenizer_processor(
     )
 
 
+def build_actor_init_kwargs(
+    args,
+    *,
+    ds_config,
+    include_lora: bool,
+    include_disable_logprobs_flashattn: bool,
+):
+    """
+    Build Actor/UrsaActor initialization kwargs while keeping train/eval variants aligned.
+    """
+    kwargs = dict(
+        use_flash_attention_2=args.flash_attn,
+        bf16=args.bf16,
+        load_in_4bit=args.load_in_4bit,
+        ds_config=ds_config,
+        packing_samples=args.packing_samples,
+        fused_linear_logprob=args.fused_linear_logprob,
+    )
+    if include_lora:
+        kwargs.update(
+            lora_rank=args.lora_rank,
+            lora_alpha=args.lora_alpha,
+            target_modules=args.target_modules,
+            lora_dropout=args.lora_dropout,
+        )
+    if include_disable_logprobs_flashattn:
+        kwargs["disable_logprobs_flashattn"] = args.disable_logprobs_flashattn
+    return kwargs
+
+
 def prepare_ursa_runtime_for_inference_engines(strategy=None):
     """
     Register the local URSA classes with HuggingFace auto classes so rollout
@@ -201,6 +231,11 @@ def train(args):
         - rm_use_engine: Generic flag retained for other reward types, but
           URSA math_prm/math_psgrpo PRM paths still load via HF directly
     """
+    if args.hf_separate_rollout_actor and args.engine_type != "hf":
+        raise ValueError("--hf_separate_rollout_actor requires --engine_type hf.")
+    if args.hf_separate_rollout_actor and not args.fsdp:
+        raise ValueError("--hf_separate_rollout_actor currently requires --fsdp.")
+
     # configure strategy
     strategy = get_strategy(args)
 
@@ -231,18 +266,25 @@ def train(args):
         # Initialize Actor (policy model)
         actor = Actor(
             args.pretrain,
-            use_flash_attention_2=args.flash_attn,
-            bf16=args.bf16,
-            load_in_4bit=args.load_in_4bit,
-            lora_rank=args.lora_rank,
-            lora_alpha=args.lora_alpha,
-            target_modules=args.target_modules,
-            lora_dropout=args.lora_dropout,
-            ds_config=ds_train_cfg,
-            packing_samples=args.packing_samples,
-            disable_logprobs_flashattn=args.disable_logprobs_flashattn,
-            fused_linear_logprob=args.fused_linear_logprob,
+            **build_actor_init_kwargs(
+                args,
+                ds_config=ds_train_cfg,
+                include_lora=True,
+                include_disable_logprobs_flashattn=True,
+            ),
         )
+
+        rollout_actor = None
+        if args.hf_separate_rollout_actor:
+            rollout_actor = Actor(
+                args.pretrain,
+                **build_actor_init_kwargs(
+                    args,
+                    ds_config=ds_eval_cfg,
+                    include_lora=True,
+                    include_disable_logprobs_flashattn=True,
+                ),
+            )
 
     if args.actor_init_on_gpu:
         actor = actor.to(torch.cuda.current_device())
@@ -310,12 +352,12 @@ def train(args):
         # Use the same Actor class (including URSA if detected)
         initial_model = Actor(
             args.pretrain,
-            use_flash_attention_2=args.flash_attn,
-            bf16=args.bf16,
-            load_in_4bit=args.load_in_4bit,
-            ds_config=ds_eval_cfg,
-            packing_samples=args.packing_samples,
-            fused_linear_logprob=args.fused_linear_logprob,
+            **build_actor_init_kwargs(
+                args,
+                ds_config=ds_eval_cfg,
+                include_lora=False,
+                include_disable_logprobs_flashattn=False,
+            ),
         )
 
         if args.fsdp:
@@ -460,6 +502,10 @@ def train(args):
         actor.gradient_checkpointing_enable(
             gradient_checkpointing_kwargs={"use_reentrant": args.gradient_checkpointing_use_reentrant}
         )
+        if rollout_actor is not None:
+            rollout_actor.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": args.gradient_checkpointing_use_reentrant}
+            )
         if critic is not None:
             critic.gradient_checkpointing_enable(
                 gradient_checkpointing_kwargs={"use_reentrant": args.gradient_checkpointing_use_reentrant}
@@ -471,6 +517,16 @@ def train(args):
         reward_models,
         initial_model,
     ) = strategy.prepare_models_and_optimizers(actor, critic, reward_models, initial_model, args, max_steps)
+
+    if rollout_actor is not None:
+        rollout_actor = strategy.prepare_model(
+            rollout_actor,
+            is_training=False,
+            shard_size=-1,
+        )
+        rollout_actor.eval()
+        strategy.offload_model(rollout_actor)
+        strategy.print("Prepared separate local HF rollout actor with FSDP full-shard.")
 
     strategy.print(reward_models)
 
@@ -499,6 +555,7 @@ def train(args):
         args,
         engine_type=args.engine_type,
         actor=actor,
+        rollout_actor=rollout_actor,
         tokenizer=tokenizer,
         processor=processor,
     )
