@@ -831,6 +831,7 @@ class StrategyBase(ABC):
         if self.inference_engine is not None and (
             self.args.enable_engine_sleep or self._uses_separate_hf_rollout_actor()
         ):
+            sleep_t0 = time.time()
             if self.inference_engine_type in ["vllm", "sglang"]:
                 self.inference_engine.sleep()
             elif self.inference_engine_type == "hf":
@@ -845,7 +846,7 @@ class StrategyBase(ABC):
             self.inference_engine_status = EngineStatus.SLEEPED
 
             self.sync_and_clear_cache()
-            self.print("Sleeped inference engine")
+            self.print(f"Sleeped inference engine, TIMECOST {time.time() - sleep_t0}")
 
     def wakeup_inference_engine(self):
         """
@@ -869,6 +870,7 @@ class StrategyBase(ABC):
                 self.offload_model(self.rollout_train_actor)
                 self.reload_model(self.inference_engine)
                 self._prepare_separate_hf_rollout_actor_for_generation()
+            self.print(f"Finished {self.inference_engine_type} wakeup, TIMECOST {time.time() - wkup_t0}")
             self.inference_engine_status = EngineStatus.WAKEUP
             return
         else:
@@ -1052,6 +1054,7 @@ class StrategyBase(ABC):
                         ]
                     )
 
+                generate_t0 = time.time()
                 with torch.no_grad():
                     sequences, attention_mask_out, _ = self.inference_engine.generate(
                         input_ids=padded_input_ids,
@@ -1072,6 +1075,14 @@ class StrategyBase(ABC):
                         eos_token_id=eos_token_id,
                         pad_token_id=pad_token_id,
                     )
+                self.print(
+                    "Local HF model.generate finished:",
+                    {
+                        "batch_size": len(batch_prompt_token_ids),
+                        "prompt_tokens": [len(token_ids) for token_ids in batch_prompt_token_ids],
+                        "elapsed_s": round(time.time() - generate_t0, 4),
+                    }
+                )
 
                 output_start_idx = padded_input_ids.size(1)
                 sequences = sequences.detach().cpu()

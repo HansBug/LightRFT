@@ -359,7 +359,6 @@ def train(args):
                 include_disable_logprobs_flashattn=False,
             ),
         )
-
         if args.fsdp:
             reference_shard_size = resolve_reference_shard_size(
                 world_size=strategy.world_size,
@@ -502,10 +501,6 @@ def train(args):
         actor.gradient_checkpointing_enable(
             gradient_checkpointing_kwargs={"use_reentrant": args.gradient_checkpointing_use_reentrant}
         )
-        if rollout_actor is not None:
-            rollout_actor.gradient_checkpointing_enable(
-                gradient_checkpointing_kwargs={"use_reentrant": args.gradient_checkpointing_use_reentrant}
-            )
         if critic is not None:
             critic.gradient_checkpointing_enable(
                 gradient_checkpointing_kwargs={"use_reentrant": args.gradient_checkpointing_use_reentrant}
@@ -523,10 +518,15 @@ def train(args):
             rollout_actor,
             is_training=False,
             shard_size=-1,
+            reshard_after_forward=False,
         )
+        rollout_actor.gradient_checkpointing_disable()
         rollout_actor.eval()
         strategy.offload_model(rollout_actor)
-        strategy.print("Prepared separate local HF rollout actor with FSDP full-shard.")
+        strategy.print(
+            "Prepared separate local HF rollout actor with FSDP full-shard, gc disabled, "
+            "and reshard_after_forward disabled."
+        )
 
     strategy.print(reward_models)
 
