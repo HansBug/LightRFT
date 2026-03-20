@@ -235,6 +235,81 @@ make format
 make fcheck
 ```
 
+## Math PRM 分支协作约定
+
+当前仓库里与 Math PRM 相关的长期协作分支如下：
+
+- `archive/math_prm_train_full_20260320`
+  - 2026-03-20 的完整快照，只读备份，不要重写，不要在上面继续开发。
+- `dev/math_prm_train_working`
+  - 当前完整开发分支。
+  - 这里允许保留脚本、测试、迁移说明、plan、tmp、AGENTS/CLAUDE 等全部辅助材料。
+  - 日常开发默认在这个分支上进行。
+- `dev/math_prm_train`
+  - 当前发往 `opendilab/main` 的精简 PR 分支。
+  - 这里只保留当前 upstream PR 需要的最小 Stage 3 训练面。
+
+### `dev/math_prm_train` 当前默认保留面
+
+以下路径默认属于 `dev/math_prm_train` 的稳定 PR 面，除非用户明确要求，否则不要主动扩大：
+
+- `examples/math_prm/README.md`
+- `examples/math_prm/README_zh.md`
+- `examples/math_prm/train_colocate.py`
+- `examples/math_prm/run_grpo_math_prm_ursa_8b.sh`
+- `examples/math_prm/reward_models.py`
+- `examples/math_prm/reward_models_utils.py`
+- `examples/math_prm/sitecustomize.py`
+- `examples/math_prm/ursa_actor.py`
+- `examples/math_prm/ursa_model/`
+- `examples/math_prm/tools/__init__.py`
+- `examples/math_prm/tools/prepare_ursa_stage3_manifest.py`
+- `examples/math_prm/tools/prepare_ursa_engine_checkpoint.py`
+- `lightrft/models/actor_language.py`
+- `lightrft/models/actor_vl.py`
+- `lightrft/strategy/config.py`
+- `lightrft/strategy/fake_strategy.py`
+- `lightrft/strategy/strategy_base.py`
+- `lightrft/strategy/vllm_utils/__init__.py`
+- `lightrft/trainer/fast_exp_maker.py`
+- `lightrft/trainer/ppo_trainer_vl.py`
+- `lightrft/trainer/spmd_ppo_trainer.py`
+- `lightrft/utils/cli_args.py`
+- `lightrft/utils/math_prm_output.py`
+- `requirements.txt`
+
+下列内容默认留在 `dev/math_prm_train_working`，不要在未得到明确指令时搬进 `dev/math_prm_train`：
+
+- `AGENTS.md` / `CLAUDE.md`
+- `plan/`
+- `tmp/`
+- `examples/math_prm/URSA_MIGRATION.md`
+- `examples/math_prm/tools/` 下除 `prepare_ursa_stage3_manifest.py`、`prepare_ursa_engine_checkpoint.py` 之外的辅助脚本
+
+### 从 `dev/math_prm_train_working` 搬运到 `dev/math_prm_train` 的规则
+
+- 默认在 `dev/math_prm_train_working` 上开发，不要把 `dev/math_prm_train` 当作日常开发分支。
+- 不要执行 `merge dev/math_prm_train_working -> dev/math_prm_train`。
+- 不要为了搬运改动而把 `dev/math_prm_train` rebase 到 `dev/math_prm_train_working` 上。
+- 如果待迁移改动已经是干净 commit，优先使用 `git cherry-pick -x <commit>`。
+- 如果一个 commit 同时包含主线代码和辅助材料，优先先在 `dev/math_prm_train_working` 上拆 commit，再搬运。
+- 如果不能先拆 commit，则在 `dev/math_prm_train` 上使用 `git cherry-pick -n <commit>`，然后只保留目标路径或目标 hunk，再重新提交。
+- 如果迁移单位天然是“路径集合”而不是 commit，则从 `dev/math_prm_train` 新建临时分支后，使用 `git restore --source=dev/math_prm_train_working -- <paths>` 选择性恢复，再提交。
+- 若 reviewer 只在 `dev/math_prm_train` 上提出修正，但这些修正也应保留在完整开发分支，请把该修正反向迁回 `dev/math_prm_train_working`。
+- 后续这类搬运工作可以直接交给 AI 执行，但 AI 必须遵守本节约定，而不是直接合并两个分支。
+
+### 搬运后的校验步骤
+
+每次把内容搬进 `dev/math_prm_train` 后，至少做以下检查：
+
+- `git status --short` 必须干净。
+- `git diff --name-only main/main...dev/math_prm_train` 只应包含本次准备进入 upstream PR 的目标路径。
+- `git diff --check main/main...dev/math_prm_train` 不应出现空白错误。
+- 如果改动触及 `examples/math_prm/README.md`、`examples/math_prm/README_zh.md` 或 `examples/math_prm/run_grpo_math_prm_ursa_8b.sh`，要用 `rg` 检查它们是否引用了未搬运的脚本、临时文档或 plan 路径。
+- 如果新增或修改了 Python 文件，优先做轻量语法检查；如果 `compileall` 受现有 `__pycache__` 目录权限限制，要在交付说明里明确写出该限制。
+- 只要存在合适的最小测试，就运行；如果没跑测试，必须明确说明没跑。
+- 如需同时维护两个工作现场，优先使用 `git worktree`，不要反复切换分支后手工清理工作树。
+
 ---
 
 ## 深入解析：模块功能与扩展指南
