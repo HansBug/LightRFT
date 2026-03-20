@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Validate the Phase 6 Stage 3 launcher alignment for URSA math_prm.
+"""Validate the current URSA Stage 3 launcher alignment for math_prm.
 
 This script is intentionally lightweight:
     - It does not import LightRFT training modules.
     - It only inspects example source files as text.
-    - It verifies the Phase 6 checklist items that should remain stable.
+    - It verifies the current launcher defaults and paths that should remain stable.
 
 Usage:
     python examples/math_prm/tools/check_phase6_script_alignment.py
@@ -41,13 +41,17 @@ RUN_SCRIPT_ENV_PATTERNS = {
     "EXPECTED_REWARD_LABEL": _bash_default_pattern("EXPECTED_REWARD_LABEL"),
     "DOCKER_BASELINE": _bash_default_pattern("DOCKER_BASELINE"),
     "N_SAMPLES": _bash_default_pattern("N_SAMPLES"),
+    "EPISODE": _bash_default_pattern("EPISODE"),
+    "RBS": _bash_default_pattern("RBS"),
     "TBS": _bash_default_pattern("TBS"),
     "MICRO_TRAIN_BATCH_SIZE": _bash_default_pattern("MICRO_TRAIN_BATCH_SIZE"),
+    "MICRO_ROLLOUT_BATCH_SIZE": _bash_default_pattern("MICRO_ROLLOUT_BATCH_SIZE"),
     "TEMPERATURE": _bash_default_pattern("TEMPERATURE"),
     "KL": _bash_default_pattern("KL"),
     "LR": _bash_default_pattern("LR"),
     "PROMPT_MAX_LEN": _bash_default_pattern("PROMPT_MAX_LEN"),
     "GENERATE_MAX_LEN": _bash_default_pattern("GENERATE_MAX_LEN"),
+    "MAX_SAMPLES": _bash_default_pattern("MAX_SAMPLES"),
     "MLP_WORKER_NUM": _bash_default_pattern("MLP_WORKER_NUM", exported=True),
     "MLP_WORKER_GPU": _bash_default_pattern("MLP_WORKER_GPU", exported=True),
 }
@@ -55,8 +59,12 @@ RUN_SCRIPT_ENV_PATTERNS = {
 
 TRAIN_ARG_PATTERNS = {
     "engine_type": re.compile(r'parser\.add_argument\("--engine_type",.*?default=(".*?"|\d+(?:\.\d+)?)', re.S),
+    "num_episodes": re.compile(r'parser\.add_argument\("--num_episodes",.*?default=(".*?"|\d+(?:\.\d+)?)', re.S),
+    "rollout_batch_size": re.compile(r'parser\.add_argument\("--rollout_batch_size",.*?default=(".*?"|\d+(?:\.\d+)?)', re.S),
+    "micro_rollout_batch_size": re.compile(r'parser\.add_argument\("--micro_rollout_batch_size",.*?default=(".*?"|\d+(?:\.\d+)?)', re.S),
     "prompt_max_len": re.compile(r'parser\.add_argument\("--prompt_max_len",.*?default=(".*?"|\d+(?:\.\d+)?)', re.S),
     "generate_max_len": re.compile(r'parser\.add_argument\("--generate_max_len",.*?default=(".*?"|\d+(?:\.\d+)?)', re.S),
+    "max_samples": re.compile(r'parser\.add_argument\("--max_samples",.*?default=(".*?"|\d+(?:\.\d+)?)', re.S),
     "train_batch_size": re.compile(r'parser\.add_argument\("--train_batch_size",.*?default=(".*?"|\d+(?:\.\d+)?)', re.S),
     "n_samples_per_prompt": re.compile(r'parser\.add_argument\(\s*"--n_samples_per_prompt",.*?default=(".*?"|\d+(?:\.\d+)?)', re.S),
     "actor_learning_rate": re.compile(r'parser\.add_argument\("--actor_learning_rate",.*?default=([^\s,\)]+)', re.S),
@@ -156,37 +164,52 @@ def collect_phase6_alignment() -> Dict[str, Any]:
             "actual": True,
             "expected": True,
         },
-        "table14_launcher_defaults": {
+        "ursa_stage3_repo_defaults": {
             "passed": (
-                int(run_defaults["N_SAMPLES"]) == 8
+                int(run_defaults["EPISODE"]) == 10
+                and int(run_defaults["N_SAMPLES"]) == 8
+                and int(run_defaults["RBS"]) == 128
+                and int(run_defaults["TBS"]) == 128
+                and int(run_defaults["MICRO_TRAIN_BATCH_SIZE"]) == 4
+                and int(run_defaults["MICRO_ROLLOUT_BATCH_SIZE"]) == 4
                 and float(run_defaults["TEMPERATURE"]) == 1.0
-                and float(run_defaults["KL"]) == 0.003
-                and float(run_defaults["LR"]) == 2e-6
-                and int(run_defaults["PROMPT_MAX_LEN"]) == 6048
+                and float(run_defaults["KL"]) == 0.001
+                and float(run_defaults["LR"]) == 1e-6
+                and int(run_defaults["PROMPT_MAX_LEN"]) == 1024
                 and int(run_defaults["GENERATE_MAX_LEN"]) == 3072
-                and int(run_defaults["TBS"]) == 512
+                and int(run_defaults["MAX_SAMPLES"]) == 15360
             ),
             "actual": {
+                "num_episodes": run_defaults["EPISODE"],
                 "n_samples_per_prompt": run_defaults["N_SAMPLES"],
+                "rollout_batch_size": run_defaults["RBS"],
                 "temperature": run_defaults["TEMPERATURE"],
                 "init_kl_coef": run_defaults["KL"],
                 "actor_learning_rate": run_defaults["LR"],
+                "micro_rollout_batch_size": run_defaults["MICRO_ROLLOUT_BATCH_SIZE"],
+                "micro_train_batch_size": run_defaults["MICRO_TRAIN_BATCH_SIZE"],
                 "prompt_max_len": run_defaults["PROMPT_MAX_LEN"],
                 "generate_max_len": run_defaults["GENERATE_MAX_LEN"],
                 "train_batch_size": run_defaults["TBS"],
+                "max_samples": run_defaults["MAX_SAMPLES"],
             },
             "expected": {
+                "num_episodes": 10,
                 "n_samples_per_prompt": 8,
+                "rollout_batch_size": 128,
                 "temperature": 1.0,
-                "init_kl_coef": 0.003,
-                "actor_learning_rate": 2e-6,
-                "prompt_max_len": 6048,
+                "init_kl_coef": 0.001,
+                "actor_learning_rate": 1e-6,
+                "micro_rollout_batch_size": 4,
+                "micro_train_batch_size": 4,
+                "prompt_max_len": 1024,
                 "generate_max_len": 3072,
-                "train_batch_size": 512,
+                "train_batch_size": 128,
+                "max_samples": 15360,
             },
         },
-        "table14_train_batch_implementation": {
-            "passed": world_size == 8 and micro_train_batch_size == 4 and train_batch_size == 512 and grad_accum == 16,
+        "local_train_batch_implementation": {
+            "passed": world_size == 8 and micro_train_batch_size == 4 and train_batch_size == 128 and grad_accum == 4,
             "actual": {
                 "world_size": world_size,
                 "micro_train_batch_size": micro_train_batch_size,
@@ -196,30 +219,38 @@ def collect_phase6_alignment() -> Dict[str, Any]:
             "expected": {
                 "world_size": 8,
                 "micro_train_batch_size": 4,
-                "train_batch_size": 512,
-                "gradient_accumulation": 16,
+                "train_batch_size": 128,
+                "gradient_accumulation": 4,
             },
         },
         "train_colocate_defaults_aligned": {
             "passed": (
                 train_defaults["engine_type"] == "hf"
-                and int(train_defaults["prompt_max_len"]) == 6048
+                and int(train_defaults["num_episodes"]) == 10
+                and int(train_defaults["rollout_batch_size"]) == 128
+                and int(train_defaults["micro_rollout_batch_size"]) == 4
+                and int(train_defaults["prompt_max_len"]) == 1024
                 and int(train_defaults["generate_max_len"]) == 3072
-                and int(train_defaults["train_batch_size"]) == 512
+                and int(train_defaults["max_samples"]) == 15360
+                and int(train_defaults["train_batch_size"]) == 128
                 and int(train_defaults["n_samples_per_prompt"]) == 8
-                and float(train_defaults["actor_learning_rate"]) == 2e-6
-                and float(train_defaults["init_kl_coef"]) == 0.003
+                and float(train_defaults["actor_learning_rate"]) == 1e-6
+                and float(train_defaults["init_kl_coef"]) == 0.001
                 and train_defaults["images_key"] == "images"
             ),
             "actual": train_defaults,
             "expected": {
                 "engine_type": "hf",
-                "prompt_max_len": 6048,
+                "num_episodes": 10,
+                "rollout_batch_size": 128,
+                "micro_rollout_batch_size": 4,
+                "prompt_max_len": 1024,
                 "generate_max_len": 3072,
-                "train_batch_size": 512,
+                "max_samples": 15360,
+                "train_batch_size": 128,
                 "n_samples_per_prompt": 8,
-                "actor_learning_rate": 2e-6,
-                "init_kl_coef": 0.003,
+                "actor_learning_rate": 1e-6,
+                "init_kl_coef": 0.001,
                 "images_key": "images",
             },
         },
@@ -236,7 +267,7 @@ def collect_phase6_alignment() -> Dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate Phase 6 script alignment for URSA Stage 3")
+    parser = argparse.ArgumentParser(description="Validate current launcher alignment for URSA Stage 3")
     parser.add_argument("--output-json", type=str, default=None, help="Optional path to write the JSON report")
     args = parser.parse_args()
 

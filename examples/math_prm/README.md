@@ -223,6 +223,27 @@ Run training:
 bash examples/math_prm/run_grpo_math_prm_ursa_8b.sh
 ```
 
+Current default launcher values now follow the explicit Stage 3 settings documented in the local `URSA-MATH` repo where available:
+
+```bash
+EPISODE=10
+N_SAMPLES=8
+RBS=128
+TBS=128
+MICRO_TRAIN_BATCH_SIZE=4
+MICRO_ROLLOUT_BATCH_SIZE=4
+LR=1e-6
+KL=0.001
+PROMPT_MAX_LEN=1024
+GENERATE_MAX_LEN=3072
+MAX_SAMPLES=15360
+```
+
+Notes:
+
+- The paper reports a one-time filtered `20K -> ~15K+` RL set. The exact filtered subset is not present locally, so the launcher keeps the converted manifest path and uses `MAX_SAMPLES=15360` as a scale proxy.
+- The paper's default hardware is `32 x H100`; the current machine default remains `1 node x 8 A100`.
+
 ## Reward Labels
 
 - `math_prm`

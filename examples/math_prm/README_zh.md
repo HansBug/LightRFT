@@ -224,6 +224,27 @@ EXPECTED_REWARD_LABEL="math_psgrpo"
 bash examples/math_prm/run_grpo_math_prm_ursa_8b.sh
 ```
 
+当前 launcher 默认值已经尽量切到本地 `URSA-MATH` 仓库里明确写出的 Stage 3 配置：
+
+```bash
+EPISODE=10
+N_SAMPLES=8
+RBS=128
+TBS=128
+MICRO_TRAIN_BATCH_SIZE=4
+MICRO_ROLLOUT_BATCH_SIZE=4
+LR=1e-6
+KL=0.001
+PROMPT_MAX_LEN=1024
+GENERATE_MAX_LEN=3072
+MAX_SAMPLES=15360
+```
+
+说明：
+
+- 论文里的 Stage 3 数据是先从 `20K` 候选做一次静态筛选后得到约 `15K+`。本地目前没有这份精确筛选子集，所以 launcher 继续读取转换后的全量 manifest，但默认用 `MAX_SAMPLES=15360` 近似这个训练规模。
+- 论文默认硬件规模是 `32 x H100`，当前机器默认仍然是 `1 节点 x 8 张 A100`。
+
 ## Reward Label 语义
 
 - `math_prm`

@@ -67,9 +67,14 @@ New training script configured for URSA-8B:
 - Added `--images_key "images"` for image input
 - Added `--freeze_prefix` to freeze vision encoder
 - Added `--limit_mm_image_per_prompt 10`
-- Increased `EPISODE=20` (stage3 uses more episodes)
-- Increased `KL=0.01` (higher for multimodal)
-- Increased `--micro_rollout_batch_size 8` (from 4)
+- Default launcher hyperparameters now follow the explicit Stage 3 values documented in the local `URSA-MATH` repo:
+  - `EPISODE=10`
+  - `N_SAMPLES=8`
+  - `RBS=128`, `TBS=128`
+  - `MICRO_TRAIN_BATCH_SIZE=4`, `MICRO_ROLLOUT_BATCH_SIZE=4`
+  - `LR=1e-6`, `KL=0.001`
+  - `PROMPT_MAX_LEN=1024`, `GENERATE_MAX_LEN=3072`
+- The original paper uses a one-time filtered `~15K` RL subset. Because that exact subset is not yet available locally, the launcher keeps the converted manifest path and uses `MAX_SAMPLES=15360` as a scale proxy by default.
 
 ## Usage
 
@@ -83,8 +88,9 @@ New training script configured for URSA-8B:
    - UrsaForTokenClassification with per-token scoring
    - Download or train from URSA-MATH stage2
 
-3. **MMathCoT-1M dataset** (15K subset for stage3)
-   - Format: `{"prompt": "...", "images": [...], "label": "math_prm", "reference": "..."}`
+3. **MMathCoT-1M dataset** (paper uses a filtered ~15K Stage 3 subset)
+   - Current local launcher uses the converted LightRFT manifest path and caps `MAX_SAMPLES` to `15360`
+   - Format: `{"prompt": "...", "images": [...], "label": "math_psgrpo", "reference": "..."}`
 
 ### Running Training
 
@@ -95,7 +101,7 @@ vim examples/math_prm/run_grpo_math_prm_ursa_8b.sh
 # Set these variables:
 # - PATH_TO_YOUR_BASE_MODEL="/path/to/URSA-8B"
 # - PATH_TO_URSA_RM="/path/to/URSA-8B-RM"
-# - PATH_TO_YOUR_MATH_DATASET="/path/to/mmathcot_stage3_15k"
+# - PATH_TO_YOUR_MATH_DATASET="/path/to/mmathcot_stage3_math_psgrpo.jsonl"
 
 # 2. Run training
 bash examples/math_prm/run_grpo_math_prm_ursa_8b.sh
@@ -107,13 +113,14 @@ bash examples/math_prm/run_grpo_math_prm_ursa_8b.sh
 {
   "prompt": "Solve the following geometry problem: ...",
   "images": ["path/to/diagram.jpg"],
-  "label": "math_prm",
+  "label": "math_psgrpo",
   "reference": "42"
 }
 ```
 
 **Label options:**
-- `"math_prm"`: PRM-only reward (default)
+- `"math_psgrpo"`: PS-GRPO reward (default Stage 3 path)
+- `"math_prm"`: PRM-only reward baseline
 - `"math_prm_combined"`: PRM + rule-based accuracy
 - `"math_rule"`: Rule-only baseline (ablation)
 

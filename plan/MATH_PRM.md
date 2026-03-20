@@ -63,19 +63,31 @@
 - 正确但有下降：`R = 1 - gamma = 0.5`
 - 错误：`R = 0`
 
-### 2.4 论文中可参考的 Stage 3 超参
+### 2.4 本地 `URSA-MATH` 仓库中明确可参考的 Stage 3 超参与训练规模
 
-- Epochs：`2`
-- Learning Rate：`2e-6`
-- Temperature：`1.0`
-- Rollout number per prompt：`8`
-- Prompt Max Length：`6048`
-- Output Max Length：`3072`
-- Precision：`bf16`
-- Train Batch Size：`512`
-- KL Coefficient：`0.003`
+- `n_samples_per_prompt = 8`
+- `num_episodes = 10`
+- `lr_warmup_ratio = 0.03`
+- `actor_learning_rate = 1e-6`
+- `init_kl_coef = 0.001`
+- `rollout_batch_size = 128`
+- `train_batch_size = 128`
+- `micro_train_batch_size = 4`
+- `micro_rollout_batch_size = 4`
+- `prompt_max_len = 1024`
+- `generate_max_len = 3072`
+- `bf16`
+- `gradient_checkpointing`
+- `zero_stage = 3`
+- `adam_offload`
 
-这些超参在前期不要求一次性全部严格对齐，但需要作为后续 phase 的对齐目标。
+训练规模方面：
+
+- 论文写明 Stage 3 先从 `20K` 候选中做一次静态筛选，最终保留约 `15K+` RL 样本
+- 本地 `/home/ubuntu/URSA-MATH` 里没有现成可直接给 LightRFT 使用的这份精确筛选子集
+- 因此当前默认策略改成：
+  - 继续使用转换后的 full manifest 路径
+  - 但把 `MAX_SAMPLES` 默认压到 `15360`，作为当前最接近论文训练规模的代理配置
 
 ### 2.5 本机现有资源、路径、状态与使用方式
 
@@ -1048,7 +1060,8 @@ Checklist：
 目标：
 
 - 把当前脚本从“可运行样例”推进到“Stage 3 复现脚本”
-- 先做阶段性对齐，再逐步逼近论文 Table 14
+- 把默认值切到本地 `URSA-MATH` 仓库中明确给出的 Stage 3 配置
+- 对当前本机还缺失的“精确 15K 筛选子集”使用可解释的代理策略，而不是继续沿用更激进的旧默认值
 
 说明：
 
@@ -1066,11 +1079,11 @@ Checklist：
   - 默认数据入口显式固定为转换后的 LightRFT manifest：
     - `/data/LightRFT/tmp/ursa_stage3/mmathcot_stage3_math_psgrpo.jsonl`
   - 去掉了与 URSA PRM 直连需求冲突的 `--rm_use_engine`
-  - 新增 Phase 6 preflight：
+  - 新增 preflight：
     - 检查 actor / RM / dataset / Dockerfile 路径是否存在
     - 检查 dataset label 是否与目标 reward path 一致
-    - 显式打印当前 Table 14 对齐快照
-    - 显式打印当前 `train_batch_size=512` 的实现方式
+    - 显式打印当前 URSA Stage 3 默认值对齐快照
+    - 显式打印当前本机 `train_batch_size=128` 的实现方式
   - 注释和使用说明里明确写明：
     - 当前所有运行和排障都以 `/data/LightRFT/Dockerfile` 为冻结环境基线
     - Dockerfile 中已安装的 pip 包版本与安装顺序不要擅自改动
@@ -1078,28 +1091,39 @@ Checklist：
       - `/home/ubuntu/URSA-MATH/examples/run_dataset_loading_example.py`
       - `/home/ubuntu/URSA-MATH/examples/validate_dataset_entrypoints.py`
     - Phase 3 baseline smoke 应走 `examples/math_prm/tools/run_phase3_smoke.sh`
-  - Table 14 对齐后的默认超参现在是：
+  - 当前默认超参现在是：
+    - `num_episodes = 10`
     - `n_samples_per_prompt = 8`
     - `temperature = 1.0`
-    - `init_kl_coef = 0.003`
-    - `actor_learning_rate = 2e-6`
-    - `prompt_max_len = 6048`
+    - `init_kl_coef = 0.001`
+    - `actor_learning_rate = 1e-6`
+    - `prompt_max_len = 1024`
     - `generate_max_len = 3072`
-    - `train_batch_size = 512`
-  - 当前 8 卡机器上的 global batch 512 实现方式明确记录为：
+    - `rollout_batch_size = 128`
+    - `train_batch_size = 128`
+    - `max_samples = 15360`
+  - 当前 8 卡机器上的 global batch 128 实现方式明确记录为：
     - `micro_train_batch_size = 4`
     - `world_size = 8`
-    - `accumulated_gradient = 16`
-    - 即 `4 x 8 x 16 = 512`
+    - `accumulated_gradient = 4`
+    - 即 `4 x 8 x 4 = 128`
+  - 关于数据规模的当前处理：
+    - 论文的精确 Stage 3 训练集仍然是“`20K -> 15K+` 静态筛选后子集”
+    - 本机尚未产出这个 LightRFT-compatible 子集
+    - 因此先用 `MAX_SAMPLES = 15360` 作为训练规模代理
 - `examples/math_prm/train_colocate.py`
   - example 默认值已同步到当前 Stage 3 入口语义：
     - `engine_type = hf`
-    - `prompt_max_len = 6048`
+    - `num_episodes = 10`
+    - `rollout_batch_size = 128`
+    - `micro_rollout_batch_size = 4`
+    - `prompt_max_len = 1024`
     - `generate_max_len = 3072`
-    - `train_batch_size = 512`
+    - `max_samples = 15360`
+    - `train_batch_size = 128`
     - `n_samples_per_prompt = 8`
-    - `actor_learning_rate = 2e-6`
-    - `init_kl_coef = 0.003`
+    - `actor_learning_rate = 1e-6`
+    - `init_kl_coef = 0.001`
     - `images_key = "images"`
   - 文档说明里也明确了：`rm_use_engine` 虽然仍是通用 flag，但 `math_prm/math_psgrpo` 的 URSA PRM 仍然走 HF 直连
 - `examples/math_prm/tools/check_phase6_script_alignment.py`
@@ -1131,16 +1155,16 @@ Checklist：
 - [x] 去掉与 PRM 直连需求冲突的 `rm_use_engine` 用法
 - [x] 明确 `freeze_prefix`、多模态开关、图像字段名等必要参数
 - [x] 明确如需先做资源 smoke test，可直接复用 `/home/ubuntu/URSA-MATH/examples/run_dataset_loading_example.py` 与 `validate_dataset_entrypoints.py`
-- [x] 梳理当前脚本参数与论文 Table 14 的差异
+- [x] 梳理当前脚本参数与本地 `URSA-MATH` Stage 3 默认值的差异
 - [x] 优先对齐 `n_samples_per_prompt = 8`
 - [x] 优先对齐 `temperature = 1.0`
-- [x] 优先对齐 `init_kl_coef = 0.003`
-- [x] 优先对齐 `actor_learning_rate = 2e-6`
-- [x] 优先对齐 `prompt_max_len = 6048`
+- [x] 优先对齐 `init_kl_coef = 0.001`
+- [x] 优先对齐 `actor_learning_rate = 1e-6`
+- [x] 优先对齐 `prompt_max_len = 1024`
 - [x] 优先对齐 `generate_max_len = 3072`
-- [x] 评估当前硬件条件下是否能直接对齐 `train_batch_size = 512`
-- [x] 记录当前 global batch `512` 的实现方式：`4 x 8 x 16 = 512`
-- [x] 确认脚本注释中明确写明“当前阶段先用全量数据，不做筛选”
+- [x] 对齐 `rollout_batch_size = 128` 与 `train_batch_size = 128`
+- [x] 记录当前 global batch `128` 的实现方式：`4 x 8 x 4 = 128`
+- [x] 确认脚本注释中明确写明“当前仍使用 full manifest，但默认 `MAX_SAMPLES = 15360` 作为论文训练规模代理”
 
 ### Phase 7：全量数据训练观测与稳定性验证
 
