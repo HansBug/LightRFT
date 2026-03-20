@@ -32,16 +32,114 @@ The runtime baseline is frozen by `/data/LightRFT/Dockerfile`.
 
 ```text
 examples/math_prm/
-├── prepare_ursa_stage3_manifest.py   # Convert URSA raw jsonl into LightRFT prompt manifest
-├── train_colocate.py                 # Main GRPO training entry
-├── run_grpo_math_prm_ursa_8b.sh      # URSA-8B + URSA-RM-8B training launcher
-├── reward_models.py                  # Reward implementations, including MathPRMReward
-├── reward_models_utils.py            # Reward model loading and routing
-├── prm_infer_score.py                # Step-level PRM scoring helpers
-├── test_reward_models.py             # Reward-side tests
-├── URSA_MIGRATION.md                 # Migration notes from URSA-MATH
-└── ursa_model/                       # Self-contained URSA model code
+├── README.md                         # This file, focused on the current Stage 3 path
+├── README_zh.md                      # Chinese version of this directory guide
+├── URSA_MIGRATION.md                 # Migration notes from the original URSA-MATH repo
+├── train_colocate.py                 # Main LightRFT training entry used by all current launchers
+├── run_grpo_math_prm_ursa_8b.sh      # Main Stage 3 reproduction launcher
+├── ursa_actor.py                     # URSA-specific actor wrapper for policy loading
+├── reward_models.py                  # Reward implementations; active path is MathPRMReward / PS-GRPO logic
+├── reward_models_utils.py            # Reward model loading, reward_fn routing, and label-to-recipe wiring
+├── prepare_ursa_stage3_manifest.py   # Convert raw MMathCoT-1M jsonl into LightRFT manifest
+├── prm_infer_score.py                # Step-level PRM scoring helper mirrored from URSA-MATH logic
+├── prepare_ursa_engine_checkpoint.py # Optional wrapper builder for vLLM/SGLang-style engine experiments
+├── sitecustomize.py                  # Local import/runtime compatibility hook for the URSA example stack
+├── check_phase2_alignment.py         # Phase 2 scorer parity check against the URSA reference behavior
+├── check_hf_rollout.py               # Minimal local-HF rollout validation for URSA
+├── check_phase6_script_alignment.py  # Lightweight checker for Stage 3 launcher defaults
+├── test_phase2_alignment.py          # Current regression tests for Phase 2/4/5/6 logic
+├── run_phase3_smoke.sh               # Time-boxed Phase 3 smoke launcher
+├── run_phase7_observation.sh         # Bounded full-data observation launcher
+├── analyze_phase7_observation.py     # Offline analyzer for saved Phase 7 trajectories/logs
+├── probe_rollout_speed_candidates.py # Performance probe for rollout-like generate modes without changing library code
+└── ursa_model/                       # Self-contained URSA model code used by actor and PRM loading
 ```
+
+## File Roles
+
+### 1. Primary training path
+
+- `run_grpo_math_prm_ursa_8b.sh`
+  - Main launcher for the current URSA-MATH Stage 3 reproduction path.
+  - Wires actor path, reward path, dataset path, FSDP settings, W&B, and rollout options.
+- `train_colocate.py`
+  - Real training entry used by `torchrun`.
+  - Loads actor / reference / reward model / dataset / trainer and starts the LightRFT PPO-GRPO loop.
+- `ursa_actor.py`
+  - URSA-specific actor wrapper.
+  - Makes LightRFT load `UrsaForConditionalGeneration` instead of a generic VLM auto-class.
+
+### 2. Reward and scoring path
+
+- `reward_models.py`
+  - Contains all reward model classes used in this example directory.
+  - The active Stage 3 path is `MathPRMReward` and the PS-GRPO reward mapping built on top of URSA-RM-8B.
+  - Historical Qwen2VL multi-reward classes are still present in this file, but they are not part of the current URSA-MATH Stage 3 training path.
+- `reward_models_utils.py`
+  - Handles reward model loading and reward function dispatch.
+  - Maps labels such as `math_prm` and `math_psgrpo` onto the current URSA reward path.
+- `prm_infer_score.py`
+  - Standalone helper for step-level PRM inference.
+  - Useful when comparing LightRFT reward behavior against URSA-MATH reference scoring.
+
+### 3. Data preparation and compatibility
+
+- `prepare_ursa_stage3_manifest.py`
+  - Converts raw `MMathCoT-1M` Stage 3 data into the `prompt / images / reference / label` schema expected by LightRFT.
+  - Also performs a lightweight dataset/collate smoke check.
+- `prepare_ursa_engine_checkpoint.py`
+  - Optional helper for engine experiments.
+  - Builds an engine-friendly wrapper checkpoint with the local URSA model code and `auto_map` metadata so vLLM/SGLang can at least attempt to load URSA.
+- `sitecustomize.py`
+  - Local runtime/import hook used to keep this example stack compatible under the frozen Docker baseline.
+
+### 4. Validation, smoke, and observation tools
+
+- `check_phase2_alignment.py`
+  - Verifies that LightRFT `MathPRMReward` remains aligned with the URSA reference scorer on a concrete sample.
+- `check_hf_rollout.py`
+  - Minimal end-to-end validation for LightRFT local `hf` rollout.
+  - Compares `gather_and_generate()` output against direct `actor.generate()`.
+- `check_phase6_script_alignment.py`
+  - Static checker that confirms the Stage 3 launcher still matches the intended defaults.
+- `test_phase2_alignment.py`
+  - Current regression test file for the URSA Stage 3 path.
+  - Covers alignment, reward mapping, answer extraction, rollout helper behavior, and related utilities.
+- `run_phase3_smoke.sh`
+  - Time-boxed Phase 3 smoke launcher for “can it run, does it trend normally, and do we clean up GPUs afterward”.
+- `run_phase7_observation.sh`
+  - Bounded full-data observation launcher for later-stage analysis.
+- `analyze_phase7_observation.py`
+  - Offline analyzer for saved trajectories and training logs.
+  - Computes the Phase 7 health checklist and PRM image-ablation summary.
+- `probe_rollout_speed_candidates.py`
+  - Minimal benchmark for rollout-like decode speed.
+  - Used to compare `fsdp_train_gc`, `fsdp_train_no_gc`, `fsdp_eval_no_gc`, and `raw_eval_no_gc` without modifying `lightrft/` itself.
+
+### 5. Self-contained URSA runtime
+
+- `ursa_model/`
+  - Local copy of the URSA model stack needed by both the actor and the PRM.
+  - Includes config, processor, image processor, projector, vision backbones, and model definitions.
+  - This directory is what allows the current Stage 3 path to run without depending on importing code directly from the external URSA-MATH repo.
+
+## Current Entry Points
+
+If you only care about the active Stage 3 reproduction path, the files you usually need are:
+
+- `run_grpo_math_prm_ursa_8b.sh`
+- `train_colocate.py`
+- `reward_models.py`
+- `reward_models_utils.py`
+- `prepare_ursa_stage3_manifest.py`
+- `check_hf_rollout.py`
+- `test_phase2_alignment.py`
+
+Everything else in this directory is either:
+
+- a one-off compatibility helper,
+- a smoke/observation tool,
+- or part of the self-contained URSA runtime.
 
 ## Local Resources
 

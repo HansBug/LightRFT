@@ -28,16 +28,115 @@ URSA-MATH Stage 3 PS-GRPO 训练迁移到 LightRFT 的实现目录。
 
 ```text
 examples/math_prm/
-├── prepare_ursa_stage3_manifest.py   # 把 URSA raw jsonl 转成 LightRFT prompt manifest
-├── train_colocate.py                 # 主训练入口
-├── run_grpo_math_prm_ursa_8b.sh      # URSA-8B + URSA-RM-8B 训练脚本
-├── reward_models.py                  # reward 实现，含 MathPRMReward
-├── reward_models_utils.py            # reward model 加载与路由
-├── prm_infer_score.py                # step-level PRM 打分逻辑
-├── test_reward_models.py             # reward 侧测试
-├── URSA_MIGRATION.md                 # 从 URSA-MATH 迁移过来的说明
+├── README.md                         # 当前 Stage 3 路径的英文说明
+├── README_zh.md                      # 当前目录的中文结构说明
+├── URSA_MIGRATION.md                 # 从原始 URSA-MATH repo 迁移到 LightRFT 的说明
+├── train_colocate.py                 # 当前训练主入口
+├── run_grpo_math_prm_ursa_8b.sh      # 当前 Stage 3 复现实验主脚本
+├── ursa_actor.py                     # URSA policy model 的自定义 actor 包装
+├── reward_models.py                  # reward 实现；当前主路径是 MathPRMReward / PS-GRPO
+├── reward_models_utils.py            # reward model 加载、label 路由和 reward_fn 组装
+├── prepare_ursa_stage3_manifest.py   # 把原始 MMathCoT-1M Stage 3 数据转换成 LightRFT manifest
+├── prm_infer_score.py                # step-level PRM 打分辅助脚本
+├── prepare_ursa_engine_checkpoint.py # 给 vLLM/SGLang 试验准备 wrapper checkpoint 的辅助脚本
+├── sitecustomize.py                  # 当前 example 栈的本地兼容性补丁入口
+├── check_phase2_alignment.py         # Phase 2 打分对齐检查脚本
+├── check_hf_rollout.py               # 本地 HF rollout 最小链路校验
+├── check_phase6_script_alignment.py  # Stage 3 启动脚本默认配置检查器
+├── test_phase2_alignment.py          # 当前 URSA Stage 3 路径的回归测试
+├── run_phase3_smoke.sh               # 限时 Phase 3 smoke 试跑脚本
+├── run_phase7_observation.sh         # 全量 bounded observation 启动脚本
+├── analyze_phase7_observation.py     # Phase 7 离线分析脚本
+├── probe_rollout_speed_candidates.py # 不改库代码时的 rollout 速度对照脚本
 └── ursa_model/                       # 自包含的 URSA 模型代码
 ```
+
+## 文件职责
+
+### 1. 主训练路径
+
+- `run_grpo_math_prm_ursa_8b.sh`
+  - 当前 URSA-MATH Stage 3 复现实验的主启动脚本。
+  - 负责拼 actor、reward、数据、FSDP、W&B 和 rollout 相关参数。
+- `train_colocate.py`
+  - 被 `torchrun` 直接调用的真实训练入口。
+  - 负责加载 actor / reference / reward model / dataset / trainer，并启动 LightRFT 训练循环。
+- `ursa_actor.py`
+  - URSA 专用 actor 包装。
+  - 让 LightRFT 用 `UrsaForConditionalGeneration` 来加载 policy 模型。
+
+### 2. Reward 与打分路径
+
+- `reward_models.py`
+  - 当前目录下所有 reward model 实现都在这里。
+  - 现在真正活跃的是 `MathPRMReward` 和基于 URSA-RM-8B 的 PS-GRPO reward 映射。
+  - 文件里还保留了一些历史的 Qwen2VL 多 reward 类，但它们已经不属于当前 URSA-MATH Stage 3 主路径。
+- `reward_models_utils.py`
+  - 负责 reward model 的加载、label 到 recipe 的映射，以及 reward_fn 组装。
+  - 当前 `math_prm` / `math_psgrpo` 的路由逻辑都在这里。
+- `prm_infer_score.py`
+  - 独立的 step-level PRM 打分辅助脚本。
+  - 适合在 LightRFT 行为和 URSA-MATH 参考实现之间做单点对比。
+
+### 3. 数据准备与兼容性
+
+- `prepare_ursa_stage3_manifest.py`
+  - 把原始 `MMathCoT-1M` Stage 3 数据转换成 LightRFT 需要的 `prompt / images / reference / label` schema。
+  - 同时会做一次轻量级 dataset/collate smoke 检查。
+- `prepare_ursa_engine_checkpoint.py`
+  - 不是当前 `hf` 主线必需，但仍然用于 engine 试验。
+  - 它会构造带本地 `ursa_model` 代码和 `auto_map` 元数据的 wrapper checkpoint，供 vLLM/SGLang 尝试加载 URSA。
+- `sitecustomize.py`
+  - 在当前冻结 Docker 基线下，为 example 目录提供本地运行时兼容性补丁。
+
+### 4. 校验、smoke 与观测工具
+
+- `check_phase2_alignment.py`
+  - 检查 LightRFT 的 `MathPRMReward` 是否和 URSA 参考 scorer 保持一致。
+- `check_hf_rollout.py`
+  - 本地 `hf` rollout 的最小链路校验。
+  - 会把 `gather_and_generate()` 的输出和直接 `actor.generate()` 做对比。
+- `check_phase6_script_alignment.py`
+  - 静态检查当前 Stage 3 启动脚本默认值是否仍然对齐。
+- `test_phase2_alignment.py`
+  - 当前 URSA Stage 3 主路径的回归测试集合。
+  - 覆盖 scorer 对齐、reward 映射、答案抽取、rollout 辅助逻辑等。
+- `run_phase3_smoke.sh`
+  - 限时 Phase 3 smoke 试跑脚本。
+  - 用来验证“能否正常起训、指标是否合理、结束后 GPU 是否清干净”。
+- `run_phase7_observation.sh`
+  - bounded full-data observation 启动脚本。
+- `analyze_phase7_observation.py`
+  - 对 Phase 7 保存下来的 trajectories 和训练日志做离线分析。
+  - 用于计算 health checklist 和 PRM 图像消融结果。
+- `probe_rollout_speed_candidates.py`
+  - 不修改 `lightrft/` 主链时，用来比较几种 rollout-like decode 运行形态速度的最小测速脚本。
+  - 目前主要用来确认 `gradient_checkpointing` 是 rollout 速度问题的主因。
+
+### 5. 自包含 URSA 运行时
+
+- `ursa_model/`
+  - 本地复制的 URSA 模型栈。
+  - 包含 config、processor、image processor、projector、vision tower 和 model 定义。
+  - 这部分是当前 Stage 3 路径能脱离外部 URSA-MATH repo 直接运行的基础。
+
+## 当前真正需要关注的入口
+
+如果你只关心当前 URSA-MATH Stage 3 复现主线，通常只需要重点看这些文件：
+
+- `run_grpo_math_prm_ursa_8b.sh`
+- `train_colocate.py`
+- `reward_models.py`
+- `reward_models_utils.py`
+- `prepare_ursa_stage3_manifest.py`
+- `check_hf_rollout.py`
+- `test_phase2_alignment.py`
+
+目录中其他文件大多属于：
+
+- 兼容性辅助脚本，
+- smoke / observation / profiling 工具，
+- 或自包含的 URSA 运行时代码。
 
 ## 本机资源路径
 
