@@ -1157,6 +1157,11 @@ Checklist：
   - `gradient_checkpointing` 是第一主因
   - 训练态 `FSDP` actor 直接承担 rollout generate 是第二主因
   - 新增最小测速脚本 `examples/math_prm/tools/probe_rollout_speed_candidates.py` 已在更贴近真实 rollout 的 `16 response/rank` 场景下复现了这个结论
+- 当前更推荐的后续架构方向也已经明确：
+  - 不再继续让训练 actor 直接承担本地 `hf` rollout
+  - 优先尝试“独立本地 `hf` rollout actor”
+  - 第一版建议走 FSDP-first 方案：独立 rollout actor、`gc off`、`eval()`、并纳入现有 wakeup/sleep 或 offload 生命周期
+  - 更完整的方案设计与实施计划详见 `plan/PHASE7_HF_ROLLOUT_PERFORMANCE_ANALYSIS.md` 新增的 `7.2` 与 `7.3`
 
 本轮最终观测配置：
 
@@ -1259,6 +1264,11 @@ Phase 7 结论：
   - 这说明当前最关键的提速杠杆不是 train/eval mode，而是 rollout 阶段必须去掉 `gradient_checkpointing`
   - 新增脚本 `examples/math_prm/tools/probe_rollout_speed_candidates.py` 的职责，就是在不修改现有库代码的情况下，用更接近真实 rollout 的 workload 比较这些候选运行形态
   - 这说明当前 rollout 的主慢点已经不再模糊，详见 `plan/PHASE7_HF_ROLLOUT_PERFORMANCE_ANALYSIS.md`
+  - 当前如果真的要开始改 rollout 代码，推荐顺序不是继续在共享训练 actor 上打补丁，而是：
+    - 先新增独立 rollout actor
+    - 先把 rollout 阶段的 `gradient_checkpointing` 彻底隔离掉
+    - 先在 FSDP 路径上验证 wakeup/offload/权重同步是否成立
+  - 这是因为当前最伤的耦合，不是某一个采样参数，而是“训练态 actor 直接兼做本地 `hf` rollout”
 - Phase 7 之后剩余的主问题已经切换成训练质量本身
   - 例如当前 `correctness_ratio` 仍只有 `0.25`
   - 以及 rollout 性能问题

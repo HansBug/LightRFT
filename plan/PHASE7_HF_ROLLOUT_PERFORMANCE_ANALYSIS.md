@@ -654,6 +654,219 @@
   - 如果后续修复，再记录修复后的首轮 generate 耗时
   - 是否回到分钟级
 
+## 7.2 当前更值得推进的架构方向：独立本地 HF rollout actor
+
+在当前证据下，后续如果真的要动代码，最值得优先尝试的方向，不是继续让训练侧 actor 直接承担本地 `hf` rollout，而是把 rollout actor 从训练 actor 中解耦出来。
+
+核心思路：
+
+- 保留现有训练 actor，继续负责：
+  - actor logprob 计算
+  - backward / optimizer step
+  - PPO 训练态参数更新
+- 新增一个专门用于 rollout generate 的 `rollout_actor`
+  - 不挂 optimizer
+  - 明确设为 `eval()`
+  - 明确关闭 `gradient_checkpointing`
+  - 只作为本地 `hf` inference engine 使用
+
+这样做的目标不是“彻底摆脱所有 FSDP 开销”，而是先切断当前最伤的耦合：
+
+- rollout 不再直接复用训练态 actor
+- rollout decode 不再被训练态 `gradient_checkpointing` 拖着跑
+- rollout 的模型生命周期可以单独做 `wakeup/sleep/offload`
+
+### 为什么这条路可行
+
+目前 LightRFT 的 rollout 架构里：
+
+- `vllm` / `sglang` 本来就是“训练 actor”和“rollout engine”分离
+- `hf` 只是一个例外，它当前直接把 `inference_engine = actor`
+- `update_engine_weights()` 也正因为这个实现而对 `hf` 直接 `skip`
+
+因此从框架设计上看：
+
+- “训练 actor”和“rollout inference object”分离，并不是新范式
+- 恰恰相反，这是当前架构的常规形态
+- 本地 `hf` 现在只是还没有补上这一层抽象
+
+此外，当前经验构建流水线里：
+
+- rollout generate
+- actor/reference/critic/reward 的后续前向
+
+是串行阶段，不是同时执行的。也就是说，独立 rollout actor 并不意味着一定要把“两份 actor”长期同时常驻在 GPU 上；在 FSDP 路径下，理论上可以在 generate 结束后立刻把 rollout actor offload，再把训练 actor / reference / reward 这条链路拉回来。
+
+### 三种实现形态的取舍
+
+#### 方案 A：全量 raw rollout 副本
+
+做法：
+
+- 新建一个完全独立的、纯推理用途的 raw HF actor
+- 不做 FSDP 包装
+- 直接拿它做 `generate()`
+
+优点：
+
+- 推理速度上限最高
+- 最接近 `raw_eval_no_gc` 基线
+
+缺点：
+
+- 显存压力最大
+- 权重同步成本最高
+- 很可能需要把训练 actor 或其他模型 aggressively offload，才能在 8 卡实跑中站住
+
+当前判断：
+
+- 这是长期值得评估的形态
+- 但不适合作为第一版实现
+
+#### 方案 B：单独 FSDP rollout actor
+
+做法：
+
+- 新建一个独立的 rollout actor
+- 与训练 actor 分离
+- rollout actor 走 FSDP 包装，但明确 `gc off + eval`
+
+优点：
+
+- 比 raw full replica 更容易过显存账
+- 已有 probe 结果说明，只要去掉 `gc`，性能就能比当前真实慢路径好一个数量级
+- 更容易复用当前 FSDP 的 `offload_model()` / `reload_model()` 能力
+
+缺点：
+
+- 仍会保留一部分 FSDP decode 开销
+- 速度上限不如 raw replica
+
+当前判断：
+
+- 这是最值得优先落地的第一版
+
+#### 方案 C：独立 rollout worker / process
+
+做法：
+
+- 本地 `hf` 不再只是在 trainer 进程里多一个模型对象
+- 而是专门起一个本地 rollout worker，训练侧只做权重同步和 RPC/进程间调用
+
+优点：
+
+- 架构上最接近真正的 engine 化方案
+- 训练和 rollout 生命周期最彻底地隔离
+
+缺点：
+
+- 工程量明显更大
+- 已经接近“做一个 mini local engine”
+
+当前判断：
+
+- 不适合现在第一步就做
+
+## 7.3 推荐的第一版实施计划
+
+### Phase A：先做 FSDP-first 的独立 rollout actor
+
+第一版推荐目标：
+
+- 新增一个本地 `hf` 分支形态，例如：
+  - `engine_type=hf_separate`
+  - 或 `engine_type=hf` + `hf_rollout_mode=separate`
+- 在 `train_colocate.py` 中额外创建 `rollout_actor`
+- `rollout_actor` 明确：
+  - 不挂 optimizer
+  - `gradient_checkpointing_disable()`
+  - `eval()`
+  - 仅用于 rollout generate
+
+为什么先做这版：
+
+- 它已经能切断当前“训练态 actor 直接 rollout”的耦合
+- 它有望在不引入 raw full replica 显存风险的前提下，先吃掉当前最大头的性能问题
+
+### Phase B：权重同步先追求稳，不先追求最激进的推理形态
+
+第一版权重同步的推荐原则：
+
+- 优先让 `rollout_actor` 与训练 actor 使用尽量一致的 FSDP 包装和 shard 布局
+- 这样做的主要目的不是极限性能，而是让同步路径更简单
+
+原因：
+
+- 如果两边的包装和参数布局一致，第一版更有机会直接做 rank-local shard copy
+- 比起先把训练 actor gather 成 full state 再灌给 rollout actor，这样更省同步成本，也更不容易再制造新的内存尖峰
+
+换句话说，第一版更合理的目标是：
+
+- **先把“共享训练 actor”改成“独立 rollout actor”**
+- **再把 rollout actor 上的 `gc` 去掉**
+- **不要在第一步就同时引入 full raw replica + full-state broadcast 这种最激进方案**
+
+### Phase C：把 rollout actor 纳入现有 sleep/wakeup 生命周期
+
+当前 `vllm` / `sglang` 已经有：
+
+- `setup_inference_engine()`
+- `wakeup_inference_engine()`
+- `maybe_sleep_inference_engine()`
+- `update_engine_weights()`
+
+第一版独立 `hf` rollout actor 也应该沿用这套生命周期，而不是额外再造一套平行逻辑。
+
+推荐的行为应该是：
+
+- rollout 前：
+  - wakeup / reload `rollout_actor`
+  - 如有必要，先 offload 训练 actor，给 rollout 阶段让显存
+- rollout 后：
+  - offload / sleep `rollout_actor`
+  - reload 训练 actor
+  - 再进入 actor logprob / initial / critic / reward 这些后续阶段
+
+这里有一个现实约束：
+
+- 当前 `offload_model()` / `reload_model()` 现成实现只在 FSDP 策略里有
+- DeepSpeed 路径目前没有同等基建
+
+所以合理顺序应当是：
+
+- 先在当前实际使用的 FSDP 路径上验证
+- DeepSpeed 兼容放到后续
+
+### Phase D：验证标准
+
+第一版是否值得继续推进，不看“代码写得漂不漂亮”，只看这几条：
+
+1. 首轮 `global step` 的 `rollout engine generation time`
+   - 是否显著低于当前 `661.9s ~ 802.7s` 量级
+2. 更贴近真实 workload 的 probe
+   - 是否至少接近 `fsdp_eval_no_gc` / `fsdp_train_no_gc` 这一档
+   - 而不再停留在 `fsdp_train_gc` 这一档
+3. 格式稳定性
+   - 不能为了提速重新引入 Phase 7 早期那类输出收集 bug
+4. 显存
+   - 不能因为多一份 rollout actor 而把整条链路推回 OOM
+
+### Phase E：如果第一版仍然不够快，再决定是否上更激进方案
+
+如果独立 FSDP rollout actor 已经把 generate 从数百秒拉回到几十秒或一两分钟，那么这条路就成立，后续可以再决定是否继续优化。
+
+只有在下面这种情况下，才值得继续往更激进方案推进：
+
+- 独立 rollout actor 已经实现
+- `gc` 已经确定不再进入 rollout
+- 但 rollout 仍显著慢于 `fsdp_eval_no_gc` 预期
+
+这时再考虑：
+
+- raw full replica
+- 本地 rollout worker
+- 重新评估 `vllm/sglang` 接入
+
 ## 8. 最终判断
 
 基于当前证据，我的判断是：
@@ -665,6 +878,8 @@
   - `gradient_checkpointing` 让 decode 路径失去 KV cache
 - 当前第二主因是：
   - 训练态 FSDP actor 直接承担 rollout generate
+- 当前最值得优先尝试的工程方案是：
+  - 新增独立本地 `hf` rollout actor，而不是继续复用训练 actor
 - 如果只是为了继续推进后续 phase，可以先接受当前速度做短时观测
 - 但如果目标是“把 Stage 3 训练做成长期高效可重复跑的方案”，这个问题迟早还得处理
 
@@ -678,15 +893,15 @@
 
 如果后面要继续处理性能，我建议顺序是：
 
-1. 先做上面的最小化对照矩阵，而不是直接猜优化点
-2. 先分离 `raw URSA`、`train mode`、`gradient_checkpointing`、`FSDP` 这几个因素
-3. 如果确认真正的主杀伤项是 `FSDP + gc + local hf actor reuse`，再决定是否改 rollout 运行上下文
-4. 如果 HF 路径没有明显低垂果子，就不要在这里无上限深挖
-5. 转而评估重新支持 `vllm/sglang` 的成本与收益
+1. 先接受“问题已经定位到 rollout 架构，而不是 reward / 格式 / PPO”这个事实
+2. 优先做上面 7.3 中的 FSDP-first 独立 rollout actor 方案，而不是继续在共享训练 actor 上做零碎修补
+3. 实现后先用 probe 和首轮真实 `global step` 验证是否回到 `no_gc` 量级
+4. 如果第一版仍然不够快，再决定是否升级到 raw full replica 或更彻底的 worker/engine 方案
+5. 如果本地 `hf` 的收益已经触顶，再转而评估重新支持 `vllm/sglang` 的成本与收益
 
 因此，当前最合理的状态是：
 
 - 问题已经基本盘清楚
-- 现在还不急着直接改代码
-- 先用最小化对照把慢点彻底拆清楚
-- 先把它作为“已知性能短板”记录下来，避免之后误判成格式或 reward 问题
+- 下一步可以开始改代码，但应当优先改 rollout 架构，而不是继续猜测单点参数
+- 第一版应以“独立 rollout actor + gc off + 可 offload”作为目标
+- 继续把它作为“已知性能短板”记录下来，避免之后误判成格式或 reward 问题
