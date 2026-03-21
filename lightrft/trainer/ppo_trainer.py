@@ -221,6 +221,8 @@ class PPOTrainer(ABC):
 
             wandb.define_metric("eval/epoch")
             wandb.define_metric("eval/*", step_metric="eval/epoch", step_sync=True)
+            wandb.define_metric("live/heartbeat_step")
+            wandb.define_metric("live/*", step_metric="live/heartbeat_step", step_sync=True)
 
         # Initialize TensorBoard writer if wandb is not available
         if self.strategy.args.use_tensorboard and self._wandb is None and self.strategy.is_rank_0():
@@ -305,6 +307,13 @@ class PPOTrainer(ABC):
             )
 
             for rand_prompts, labels in self.prompts_dataloader:
+                self.strategy.set_wandb_progress_context(global_step=steps, episode=episode + 1)
+                self.strategy.log_wandb_live_metrics(
+                    force=True,
+                    phase="collect_start",
+                    collect_batch_size=len(rand_prompts),
+                    collect_n_samples_per_prompt=args.n_samples_per_prompt,
+                )
                 for i, experience in enumerate(
                     self.experience_maker.make_experience_list(rand_prompts, all_labels=labels, **self.generate_kwargs)
                 ):

@@ -171,7 +171,12 @@ mkdir -p "rft_logs/${EXPERIMENT_NAME}"
 export TORCH_NCCL_AVOID_RECORD_STREAMS=1
 export NCCL_DEBUG="WARN"
 export IGNORE_EOS=0
-export WANDB_MODE="${WANDB_MODE:-offline}"   # Set to "online" for real-time W&B logging.
+if [[ -n "${WANDB_API_KEY}" && "${WANDB_API_KEY}" != "YOUR_WANDB_API_KEY" ]]; then
+    export WANDB_MODE="${WANDB_MODE:-online}"
+else
+    export WANDB_MODE="${WANDB_MODE:-offline}"
+fi
+WANDB_HEARTBEAT_INTERVAL_SECS="${WANDB_HEARTBEAT_INTERVAL_SECS:-60}"
 export PATH_TO_YOUR_BASE_MODEL
 export PATH_TO_URSA_RM
 export PATH_TO_YOUR_MATH_DATASET
@@ -196,6 +201,7 @@ export LOCAL_HF_GENERATE_MAX_BATCH_SIZE
 export LOCAL_HF_MAX_NEW_TOKENS
 export HF_SEPARATE_ROLLOUT_KEEP_ON_GPU
 export NUM_TRAJECTORIES_TO_SAVE
+export WANDB_HEARTBEAT_INTERVAL_SECS
 
 python - <<'PY'
 import json
@@ -305,9 +311,23 @@ PY
 REWARD_PRETRAIN_PATHS="{\"math_prm\":\"${PATH_TO_URSA_RM}\"}"
 
 WANDB_ARGS=()
+WANDB_ENABLE_REASON="disabled"
+WANDB_USE_WANDB_ARG=""
 if [[ -n "${WANDB_API_KEY}" && "${WANDB_API_KEY}" != "YOUR_WANDB_API_KEY" ]]; then
+    WANDB_ENABLE_REASON="${WANDB_KEY_SOURCE}"
+    WANDB_USE_WANDB_ARG="__env__"
+elif python - <<'PY' >/dev/null 2>&1
+import wandb
+raise SystemExit(0 if bool(wandb.api.api_key) else 1)
+PY
+then
+    WANDB_ENABLE_REASON="existing_wandb_login"
+    WANDB_USE_WANDB_ARG="__existing_login__"
+fi
+
+if [[ -n "${WANDB_USE_WANDB_ARG}" ]]; then
     WANDB_ARGS=(
-        --use_wandb "__env__"
+        --use_wandb "${WANDB_USE_WANDB_ARG}"
         --wandb_project "${WANDB_PROJECT}"
         --wandb_run_name "${WANDB_RUN_NAME}"
     )
@@ -316,7 +336,7 @@ if [[ -n "${WANDB_API_KEY}" && "${WANDB_API_KEY}" != "YOUR_WANDB_API_KEY" ]]; th
             --wandb_org "${WANDB_ORG}"
         )
     fi
-    echo "[run_grpo_math_prm_ursa_8b.sh] WANDB enabled for this run via ${WANDB_KEY_SOURCE}."
+    echo "[run_grpo_math_prm_ursa_8b.sh] WANDB enabled for this run via ${WANDB_ENABLE_REASON}."
 else
     echo "[run_grpo_math_prm_ursa_8b.sh] WANDB disabled for this run."
 fi
@@ -415,6 +435,7 @@ torchrun \
     --local_hf_generate_max_batch_size ${LOCAL_HF_GENERATE_MAX_BATCH_SIZE} \
     --local_hf_max_new_tokens ${LOCAL_HF_MAX_NEW_TOKENS} \
     --enable_engine_sleep \
+    --wandb_heartbeat_interval_secs ${WANDB_HEARTBEAT_INTERVAL_SECS} \
     "${HF_ROLLOUT_ARGS[@]}" \
     --system_prompt "${SYSTEM_PROMPT}" \
     --l2 1.0e-2 \

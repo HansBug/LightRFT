@@ -244,6 +244,8 @@ class PPOTrainerVL(ABC):
             # even if evaluations happen rarely
             wandb.define_metric("eval/global_step")
             wandb.define_metric("eval/*", step_metric="eval/global_step")
+            wandb.define_metric("live/heartbeat_step")
+            wandb.define_metric("live/*", step_metric="live/heartbeat_step")
 
         # Initialize TensorBoard writer if wandb is not available
         if self.strategy.args.use_tensorboard and self._wandb is None and self.strategy.is_rank_0():
@@ -380,6 +382,7 @@ class PPOTrainerVL(ABC):
             )
 
             for batch in self.prompts_dataloader:
+                self.strategy.set_wandb_progress_context(global_step=steps, episode=episode + 1)
                 # Compatible with both image-only (4 args) and video (5 args) dataloaders
                 if len(batch) == 5:
                     rand_prompts, rand_images, rand_videos, rand_references, rand_labels = batch
@@ -395,6 +398,12 @@ class PPOTrainerVL(ABC):
                     f"preview_images={rand_images[:batch_preview]}, "
                     f"preview_references={rand_references[:batch_preview]}, "
                     f"preview_labels={rand_labels[:batch_preview]}"
+                )
+                self.strategy.log_wandb_live_metrics(
+                    force=True,
+                    phase="collect_start",
+                    collect_batch_size=len(rand_prompts),
+                    collect_n_samples_per_prompt=args.n_samples_per_prompt,
                 )
 
                 for i, experience in enumerate(
