@@ -1176,16 +1176,19 @@ Checklist：
 - 之前的格式稳定性问题已定位并修复，根因详见 `plan/PHASE7_FORMAT_STABILITY_ANALYSIS.md`
 - 当前仍有一个独立保留问题：本地 `hf` 多模态 rollout 速度明显偏慢，但已不再阻塞 bounded run 完成
 - 推理性能拆解详见 `plan/PHASE7_HF_ROLLOUT_PERFORMANCE_ANALYSIS.md`
-- 截至 `2026-03-20`，性能问题已进一步缩小到“训练态 actor 的 decode 形态”：
-  - 单独 `URSA-8B` 直接推理是十几秒量级
-  - `gradient_checkpointing` 是第一主因
-  - 训练态 `FSDP` actor 直接承担 rollout generate 是第二主因
-  - 新增最小测速脚本 `examples/math_prm/tools/probe_rollout_speed_candidates.py` 已在更贴近真实 rollout 的 `16 response/rank` 场景下复现了这个结论
-- 当前更推荐的后续架构方向也已经明确：
-  - 不再继续让训练 actor 直接承担本地 `hf` rollout
-  - 优先尝试“独立本地 `hf` rollout actor”
-  - 第一版建议走 FSDP-first 方案：独立 rollout actor、`gc off`、`eval()`、并纳入现有 wakeup/sleep 或 offload 生命周期
-  - 更完整的方案设计与实施计划详见 `plan/PHASE7_HF_ROLLOUT_PERFORMANCE_ANALYSIS.md` 新增的 `7.2` 与 `7.3`
+- 截至 `2026-03-21`，对 rollout 慢点的判断已进一步更新：
+  - 早期 `gc`/训练态 actor 假设只解释了最初一层问题，不足以解释默认主训练入口当前的全部 slowdown
+  - 最新主入口 30 分钟完整 profile 已确认：
+    - 默认参数下，首个 `global step` 约 `1163.41s`
+    - 其中 rollout generate 约 `989.93s`
+    - PPO train 约 `81.04s`
+    - 训练后权重同步约 `1.75s`
+  - 当前真正的主慢点已经收敛到：
+    - 本地 `hf` rollout 把扩展后的 `128` 个 rollout sample
+    - 按 `local_hf_generate_max_batch_size = 4` 串行切成 `32` 个 generate chunk
+    - 而每个 chunk 的 `model.generate` 本身又要约 `26 ~ 45s`
+  - 这说明现在的问题核心已经不是 reward / PPO / structured stop，而是 local HF rollout generate 的吞吐与 chunk 组织方式
+  - 完整 profile 的原始文件和详细结论，见 `plan/PHASE7_HF_ROLLOUT_PERFORMANCE_ANALYSIS.md` 新增的 `7.4`
 
 本轮最终观测配置：
 
@@ -1274,7 +1277,11 @@ Phase 7 结论：
   - 之前的格式异常主要是 rollout 集成 bug，而不是 URSA 本体问题
 - Phase 7 同时也保留了一个需要后续单独处理的问题：
   - `hf` 多模态 rollout 仍然偏慢
-  - 当前虽然已经不再超时，但单轮 `rollout engine generation time` 仍在 `661.9063s` 量级
+  - bounded observation 虽然已经能完成，但这不能代表默认主训练入口已经健康
+  - 最新主入口 30 分钟完整 profile 显示：
+    - 默认参数下首轮 `rollout engine generation time = 989.9257s`
+    - 单步总耗时约 `1163.41s/it`
+    - 本地 rollout 实际是在串行跑 `32` 个 `batch_size=4` 的 `model.generate` chunk
   - `2026-03-20` 的 4 组最小化对照已经说明：
     - 单独 `URSA-8B` 本身不慢
     - `raw + train + gc on` 会从 `14.604s` 掉到 `306.014s`
@@ -1285,14 +1292,17 @@ Phase 7 结论：
     - `fsdp_train_no_gc = 68.869s`
     - `fsdp_eval_no_gc = 65.816s`
     - `raw_eval_no_gc = 44.139s`
-  - 这说明当前最关键的提速杠杆不是 train/eval mode，而是 rollout 阶段必须去掉 `gradient_checkpointing`
+  - 但在真正的默认主训练入口里，最新 profile 进一步说明：
+    - 当前最关键的提速杠杆已经收敛到 generate 吞吐与 chunk 组织
+    - `structured_stop` 不是主因
+    - PPO train 不是主因
+    - rollout 后权重同步也不是主因
   - 新增脚本 `examples/math_prm/tools/probe_rollout_speed_candidates.py` 的职责，就是在不修改现有库代码的情况下，用更接近真实 rollout 的 workload 比较这些候选运行形态
   - 这说明当前 rollout 的主慢点已经不再模糊，详见 `plan/PHASE7_HF_ROLLOUT_PERFORMANCE_ANALYSIS.md`
-  - 当前如果真的要开始改 rollout 代码，推荐顺序不是继续在共享训练 actor 上打补丁，而是：
-    - 先新增独立 rollout actor
-    - 先把 rollout 阶段的 `gradient_checkpointing` 彻底隔离掉
-    - 先在 FSDP 路径上验证 wakeup/offload/权重同步是否成立
-  - 这是因为当前最伤的耦合，不是某一个采样参数，而是“训练态 actor 直接兼做本地 `hf` rollout”
+  - 当前如果真的要继续改 rollout 代码，推荐顺序已经更新为：
+    - 先基于完整主入口 profile 继续看 generate 路径
+    - 优先优化 local HF generate 吞吐和 chunk 组织
+    - 再决定 local HF 路径是否值得继续深挖，还是转向更 engine 化的 rollout 方案
 - Phase 7 之后剩余的主问题已经切换成训练质量本身
   - 例如当前 `correctness_ratio` 仍只有 `0.25`
   - 以及 rollout 性能问题

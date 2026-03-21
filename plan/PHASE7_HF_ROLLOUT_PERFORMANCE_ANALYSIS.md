@@ -867,41 +867,176 @@
 - 本地 rollout worker
 - 重新评估 `vllm/sglang` 接入
 
+## 7.4 `2026-03-21` 主训练入口 30 分钟完整 profile
+
+为避免继续靠局部日志和试探性改动猜测，这里补一轮真正基于主训练入口的完整 profile。
+
+### profile 方式
+
+- 主入口：
+  - `examples/math_prm/run_grpo_math_prm_ursa_8b.sh`
+- 运行口径：
+  - 使用当前默认 Stage 3 脚本参数，不缩成玩具配置
+  - 真实参数快照见：
+    - `/data/LightRFT/rft_logs/lightrft-ursa8b-main-profile-v3/node0_20260321_230150.log`
+- profile 工具：
+  - `py-spy record --subprocesses --nonblocking -r 10 -f raw`
+  - `nvidia-smi dmon -d 1 -o DT`
+  - `nvidia-smi pmon -d 1 -s um`
+  - `top -b -d 1`
+
+### 原始产物
+
+- 详细报告：
+  - `/data/LightRFT/tmp/profiles/20260321_main_profile_full30_v2/PROFILE_REPORT.md`
+- `py-spy` 原始采样：
+  - `/data/LightRFT/tmp/profiles/20260321_main_profile_full30_v2/pyspy_main.raw`
+- `py-spy` 控制台输出：
+  - `/data/LightRFT/tmp/profiles/20260321_main_profile_full30_v2/pyspy_console.log`
+- GPU `dmon`：
+  - `/data/LightRFT/tmp/profiles/20260321_main_profile_full30_v2/nvidia_smi_dmon.log`
+- GPU `pmon`：
+  - `/data/LightRFT/tmp/profiles/20260321_main_profile_full30_v2/nvidia_smi_pmon.log`
+- CPU `top`：
+  - `/data/LightRFT/tmp/profiles/20260321_main_profile_full30_v2/top_full.log`
+- 主训练日志：
+  - `/data/LightRFT/rft_logs/lightrft-ursa8b-main-profile-v3/node0_20260321_230150.log`
+
+### 关键观察
+
+先看第一轮真实 `global step` 的主日志：
+
+- 首轮 collect 开始后，本地 rollout 直接进入：
+  - `Start VLM gather_and_generate ..., total prompts: 128`
+- 随后连续出现 `32` 条 `Local HF model.generate finished`
+  - 每条 `batch_size = 4`
+  - 说明这一轮 rollout 本质上是在串行跑 `128 / 4 = 32` 个本地 HF generate chunk
+- 这 `32` 个 chunk 的实测统计为：
+  - 平均 `30.694s/chunk`
+  - 总和 `982.196s`
+- 主日志给出的同一轮汇总是：
+  - `***Rollout engine generation time (global max): 989.9257s`
+- 之后同一轮：
+  - `PPO Train TIMECOST = 81.0378s`
+  - `update engine weights = 1.7531s`
+  - 进度条直接显示 `1163.41s/it`
+
+也就是说，这一轮首个 `global step` 的时间拆解已经足够清楚：
+
+- rollout generate：约 `989.9s`
+- PPO train：约 `81.0s`
+- 训练后权重同步：约 `1.75s`
+
+这直接说明：
+
+- 当前主慢点已经不是 PPO 训练
+- 也不是 rollout 后的权重同步
+- 而是 **本地 HF rollout 的 `model.generate` 本身**
+
+### structured stop 不是主因
+
+同一批 `Local HF model.generate finished` 日志里，还带了 `structured_stop_stats`。
+
+这轮统计为：
+
+- `decode_time_s` 平均 `0.0256s`
+- `decode_time_s` 最大 `0.0345s`
+
+相对于每个 chunk `25s ~ 45s` 的生成耗时，这一部分基本可以忽略。
+
+### GPU 也没有被真正打满
+
+来自 `nvidia_smi_dmon.log` 的整轮统计：
+
+- 8 卡总样本数：`14584`
+- 平均 `SM` 利用率：`47.89%`
+- 最大 `SM` 利用率：`100%`
+- 平均 `mem` 利用率：`14.83%`
+- 最大 `mem` 利用率：`50%`
+
+这说明当前慢路径并不是“GPU 一直满载硬算不过来”，而是本地 HF rollout generate 这条执行形态本身吞吐就不高。
+
+### `py-spy` 采样也指向 generate
+
+对 `pyspy_main.raw` 做关键词统计后，最明显的命中集中在：
+
+- `generate`
+- `sample`
+- `flash_attn`
+
+而：
+
+- `datasets`
+- `tokenizer`
+- `DataLoader`
+- `wait`
+
+这些都很少。
+因此这轮 profile 也不支持“瓶颈主要在 dataloader / I/O / CPU wait”这种解释。
+
+### 当前最硬的结论
+
+这轮完整 profile 之后，可以把结论收紧成一句话：
+
+> 当前默认主训练入口之所以慢，核心原因是：本地 `hf` rollout 在真实配置下需要把扩展后的 `128` 个 rollout sample，按 `batch_size=4` 串行切成 `32` 个 generate chunk，而每个 chunk 的 `model.generate` 本身就要约 `26 ~ 45s`。
+
+因此，真正该继续优化的对象是：
+
+- 本地 HF rollout generate 的吞吐
+- rollout sample 的 chunk 组织方式
+- 以及是否还应继续坚持当前这条 local HF/FSDP generate 路径
+
+而不是：
+
+- PPO loss
+- reward 聚合
+- structured stop
+- rollout 后权重同步
+
 ## 8. 最终判断
 
 基于当前证据，我的判断是：
 
 - 当前性能问题是真实存在的
 - 当前 slowdown 并不能用“URSA 本来就慢”来解释
-- 当前一个 `global step` 跑到十几分钟乃至一小时，**不正常**
-- 当前第一主因已经基本确定为：
-  - `gradient_checkpointing` 让 decode 路径失去 KV cache
-- 当前第二主因是：
-  - 训练态 FSDP actor 直接承担 rollout generate
-- 当前最值得优先尝试的工程方案是：
-  - 新增独立本地 `hf` rollout actor，而不是继续复用训练 actor
+- 当前默认主训练入口一个 `global step` 跑到 `1163.41s`，**不正常**
+- 早期“`gc` 是第一主因”的判断，已经不足以解释当前状态
+- 最新 30 分钟完整 profile 已经确认：
+  - 主慢点是本地 `hf` rollout 的 serial chunked `model.generate`
+  - 第一轮 `global step` 中 rollout generate 约 `989.9s`
+  - PPO train 只有约 `81.0s`
+  - rollout 后权重同步只有约 `1.75s`
+  - structured stop 的 decode 时间只有毫秒级
+- 独立 rollout actor 这条路仍然是正确方向
+  - 它解决的是“训练 actor 与 rollout actor 解耦”的结构问题
+  - 但它本身还没有把默认主训练入口的吞吐问题彻底解决
 - 如果只是为了继续推进后续 phase，可以先接受当前速度做短时观测
 - 但如果目标是“把 Stage 3 训练做成长期高效可重复跑的方案”，这个问题迟早还得处理
 
 更具体地说：
 
-- 短期：先把问题彻底拆清楚，不急着盲改
-- 中期：优先做上面的最小化对照矩阵
-- 长期：最值得的方向仍然是重新获得 `vllm/sglang` 级别的 rollout 支持
+- 短期：停止把时间花在 reward / PPO / structured stop 这些非主因上
+- 中期：把焦点收敛到本地 HF generate 吞吐与 chunk 组织
+- 长期：如果 local HF 路径收益触顶，仍要回到更 engine 化的 rollout 方案
 
 ## 9. 建议的下一步
 
 如果后面要继续处理性能，我建议顺序是：
 
-1. 先接受“问题已经定位到 rollout 架构，而不是 reward / 格式 / PPO”这个事实
-2. 优先做上面 7.3 中的 FSDP-first 独立 rollout actor 方案，而不是继续在共享训练 actor 上做零碎修补
-3. 实现后先用 probe 和首轮真实 `global step` 验证是否回到 `no_gc` 量级
-4. 如果第一版仍然不够快，再决定是否升级到 raw full replica 或更彻底的 worker/engine 方案
-5. 如果本地 `hf` 的收益已经触顶，再转而评估重新支持 `vllm/sglang` 的成本与收益
+1. 先接受“问题已经定位到 rollout generate 吞吐，而不是 reward / 格式 / PPO”这个事实
+2. 每次改动都继续保留真实主入口 profile，而不是只看 smoke run
+3. 下一轮优化应优先验证：
+   - 能否减少默认路径下的 serial generate chunk 数
+   - 能否提升单个 chunk 的 local HF generate 吞吐
+4. 如果做完这两类优化后，默认主入口仍然停留在十几分钟一个 `global step`
+   - 再决定是否继续投入 local HF 路径
+   - 或转向更 engine 化的 rollout 实现
+5. 无论后续选哪条路，都应保留 7.4 这轮完整 profile 作为基准线
 
 因此，当前最合理的状态是：
 
 - 问题已经基本盘清楚
-- 下一步可以开始改代码，但应当优先改 rollout 架构，而不是继续猜测单点参数
-- 第一版应以“独立 rollout actor + gc off + 可 offload”作为目标
+- 下一步可以开始改代码，但应当优先改 generate 路径与 chunk 组织，而不是继续猜测单点参数
+- “独立 rollout actor + rollout `gc off`”已经不是假设，而是当前路径的一部分
+- 下一阶段的优化目标，应明确切到“让默认主入口的 rollout generate 从 `~989.9s/step` 明显下降”
 - 继续把它作为“已知性能短板”记录下来，避免之后误判成格式或 reward 问题
