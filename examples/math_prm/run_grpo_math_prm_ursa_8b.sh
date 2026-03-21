@@ -141,12 +141,15 @@ export GPUS_PER_NODE=$MLP_WORKER_GPU
 # URSA-8B-RM (8B params) runs on a single GPU; this controls the actor engine.
 ENGINE_TYPE="${ENGINE_TYPE:-hf}"
 HF_SEPARATE_ROLLOUT_ACTOR="${HF_SEPARATE_ROLLOUT_ACTOR:-1}"
+HF_SEPARATE_ROLLOUT_KEEP_ON_GPU="${HF_SEPARATE_ROLLOUT_KEEP_ON_GPU:-1}"
 if [[ "${ENGINE_TYPE}" == "hf" ]]; then
     ENGINE_TP="${ENGINE_TP:-1}"
     LOCAL_HF_GENERATE_MAX_BATCH_SIZE="${LOCAL_HF_GENERATE_MAX_BATCH_SIZE:-4}"
+    LOCAL_HF_MAX_NEW_TOKENS="${LOCAL_HF_MAX_NEW_TOKENS:-512}"
 else
     ENGINE_TP="${ENGINE_TP:-2}"
     LOCAL_HF_GENERATE_MAX_BATCH_SIZE="${LOCAL_HF_GENERATE_MAX_BATCH_SIZE:-0}"
+    LOCAL_HF_MAX_NEW_TOKENS="${LOCAL_HF_MAX_NEW_TOKENS:-0}"
 fi
 EVAL_SPLIT="${EVAL_SPLIT:-}"
 USE_URSA_ENGINE_WRAPPER="${USE_URSA_ENGINE_WRAPPER:-1}"
@@ -190,6 +193,8 @@ export GENERATE_MAX_LEN
 export MAX_SAMPLES
 export ENGINE_TYPE
 export LOCAL_HF_GENERATE_MAX_BATCH_SIZE
+export LOCAL_HF_MAX_NEW_TOKENS
+export HF_SEPARATE_ROLLOUT_KEEP_ON_GPU
 export NUM_TRAJECTORIES_TO_SAVE
 
 python - <<'PY'
@@ -275,6 +280,8 @@ for name, (env_key, expected_value) in ursa_stage3_targets.items():
 print(
     "[run_grpo_math_prm_ursa_8b.sh] URSA Stage 3 preflight: "
     f"engine_type={os.environ['ENGINE_TYPE']}, "
+    f"local_hf_max_new_tokens={os.environ['LOCAL_HF_MAX_NEW_TOKENS']}, "
+    f"hf_separate_rollout_keep_on_gpu={os.environ['HF_SEPARATE_ROLLOUT_KEEP_ON_GPU']}, "
     f"world_size={world_size}, "
     f"train_batch_size={train_batch_size}, "
     f"micro_train_batch_size={micro_train_batch_size}, "
@@ -319,6 +326,11 @@ if [[ "${ENGINE_TYPE}" == "hf" && "${HF_SEPARATE_ROLLOUT_ACTOR}" == "1" ]]; then
     HF_ROLLOUT_ARGS=(
         --hf_separate_rollout_actor
     )
+    if [[ "${HF_SEPARATE_ROLLOUT_KEEP_ON_GPU}" == "1" ]]; then
+        HF_ROLLOUT_ARGS+=(
+            --hf_separate_rollout_keep_on_gpu
+        )
+    fi
     echo "[run_grpo_math_prm_ursa_8b.sh] Separate local HF rollout actor enabled."
 fi
 
@@ -401,6 +413,7 @@ torchrun \
     --engine_mem_util 0.6 \
     --engine_tp_size $ENGINE_TP \
     --local_hf_generate_max_batch_size ${LOCAL_HF_GENERATE_MAX_BATCH_SIZE} \
+    --local_hf_max_new_tokens ${LOCAL_HF_MAX_NEW_TOKENS} \
     --enable_engine_sleep \
     "${HF_ROLLOUT_ARGS[@]}" \
     --system_prompt "${SYSTEM_PROMPT}" \

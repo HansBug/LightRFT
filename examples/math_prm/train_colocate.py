@@ -514,6 +514,7 @@ def train(args):
     ) = strategy.prepare_models_and_optimizers(actor, critic, reward_models, initial_model, args, max_steps)
 
     if rollout_actor is not None:
+        keep_rollout_on_gpu = bool(getattr(strategy.config, "hf_separate_rollout_keep_on_gpu", False))
         rollout_actor = strategy.prepare_model(
             rollout_actor,
             is_training=False,
@@ -522,10 +523,12 @@ def train(args):
         )
         rollout_actor.gradient_checkpointing_disable()
         rollout_actor.eval()
-        strategy.offload_model(rollout_actor)
+        if not keep_rollout_on_gpu:
+            strategy.offload_model(rollout_actor)
+        residency_note = "kept on GPU" if keep_rollout_on_gpu else "offloaded to CPU"
         strategy.print(
             "Prepared separate local HF rollout actor with FSDP full-shard, gc disabled, "
-            "and reshard_after_forward disabled."
+            f"reshard_after_forward disabled, and {residency_note}."
         )
 
     strategy.print(reward_models)

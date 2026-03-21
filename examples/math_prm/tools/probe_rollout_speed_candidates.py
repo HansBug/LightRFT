@@ -23,7 +23,7 @@ for path in (TOOLS_DIR, MATH_PRM_DIR):
 
 from check_hf_rollout import SYSTEM_PROMPT, load_actor
 from lightrft.strategy.strategy import get_strategy
-from train_colocate import load_actor_tokenizer_processor
+from train_colocate import load_actor_tokenizer_processor, prepare_ursa_runtime_for_inference_engines
 
 
 def parse_args():
@@ -38,6 +38,7 @@ def parse_args():
             "fsdp_train_gc",
             "fsdp_train_no_gc",
             "fsdp_eval_no_gc",
+            "fsdp_separate_rollout",
         ],
         required=True,
     )
@@ -51,6 +52,8 @@ def parse_args():
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--repetition-penalty", type=float, default=1.05)
     parser.add_argument("--no-repeat-ngram-size", type=int, default=4)
+    parser.add_argument("--local-hf-max-new-tokens", type=int, default=0)
+    parser.add_argument("--keep-rollout-on-gpu", action="store_true", default=False)
     parser.add_argument("--output-json", default=None)
     return parser.parse_args()
 
@@ -105,6 +108,15 @@ def chunk_batch(batch, start: int, end: int):
     return chunk
 
 
+def extract_prompt_token_ids(input_ids: torch.Tensor, attention_mask: torch.Tensor) -> list[list[int]]:
+    prompt_token_ids = []
+    input_ids_cpu = input_ids.detach().cpu()
+    attention_mask_cpu = attention_mask.detach().cpu()
+    for row_ids, row_mask in zip(input_ids_cpu, attention_mask_cpu):
+        prompt_token_ids.append(row_ids[row_mask.bool()].tolist())
+    return prompt_token_ids
+
+
 def maybe_configure_gc(actor, enabled: bool):
     if enabled:
         actor.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
@@ -119,6 +131,14 @@ def init_dist_if_needed():
             dist.init_process_group(backend="nccl")
 
 
+def ensure_single_process_fsdp_env():
+    os.environ.setdefault("RANK", "0")
+    os.environ.setdefault("WORLD_SIZE", "1")
+    os.environ.setdefault("LOCAL_RANK", "0")
+    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    os.environ.setdefault("MASTER_PORT", "29600")
+
+
 def maybe_barrier():
     if dist.is_available() and dist.is_initialized():
         dist.barrier()
@@ -130,7 +150,14 @@ def world_info():
     return 0, 1
 
 
-def make_fsdp_args():
+def make_fsdp_args(
+    *,
+    local_hf_generate_max_batch_size: int = 0,
+    local_hf_max_new_tokens: int = 0,
+    enable_engine_sleep: bool = False,
+    hf_separate_rollout_actor: bool = False,
+    hf_separate_rollout_keep_on_gpu: bool = False,
+):
     return SimpleNamespace(
         seed=42,
         max_norm=1.0,
@@ -146,8 +173,11 @@ def make_fsdp_args():
         overlap_comm=False,
         engine_type="hf",
         engine_tp_size=1,
-        local_hf_generate_max_batch_size=0,
-        enable_engine_sleep=False,
+        local_hf_generate_max_batch_size=local_hf_generate_max_batch_size,
+        local_hf_max_new_tokens=local_hf_max_new_tokens,
+        enable_engine_sleep=enable_engine_sleep,
+        hf_separate_rollout_actor=hf_separate_rollout_actor,
+        hf_separate_rollout_keep_on_gpu=hf_separate_rollout_keep_on_gpu,
         local_rank=-1,
         sp_size=1,
         actor_learning_rate=2e-6,
@@ -205,6 +235,64 @@ def summarize(args, elapsed: float, generated_tokens, peak_mem_gb: float):
     }
 
 
+def probe_separate_rollout(strategy, actor, rollout_actor, processor, tokenizer, batch, prompts, images, args):
+    prompt_token_ids = extract_prompt_token_ids(batch["input_ids"], batch["attention_mask"])
+    sampling_params = {
+        "temperature": args.temperature,
+        "top_p": args.top_p,
+        "top_k": -1,
+        "max_new_tokens": args.max_new_tokens,
+        "min_new_tokens": 1,
+        "do_sample": True,
+        "repetition_penalty": args.repetition_penalty,
+        "no_repeat_ngram_size": args.no_repeat_ngram_size,
+        "structured_answer_stop": True,
+    }
+
+    setup_sync_stats = dict(strategy.last_separate_hf_rollout_sync_stats or {})
+
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats(torch.cuda.current_device())
+    maybe_barrier()
+    torch.cuda.synchronize()
+    rollout_t0 = time.time()
+    outputs = strategy.gather_and_generate(
+        sampling_params=sampling_params,
+        all_prompt_token_ids=prompt_token_ids,
+        all_prompts=prompts,
+        all_images=images,
+        sleep_engine=True,
+        images_num=[1 for _ in prompts],
+        all_images_pixel_values=batch.get("pixel_values"),
+        all_images_grid_thw=batch.get("image_grid_thw"),
+    )
+    torch.cuda.synchronize()
+    rollout_elapsed = time.time() - rollout_t0
+
+    sync_t0 = time.time()
+    strategy.update_engine_weights(actor)
+    torch.cuda.synchronize()
+    update_elapsed = time.time() - sync_t0
+
+    generated_tokens = [len(output.output_token_ids) for output in outputs]
+    return {
+        "mode": args.mode,
+        "prompt_count": args.prompt_count,
+        "local_samples": args.local_samples,
+        "chunk_size": args.chunk_size,
+        "max_new_tokens": args.max_new_tokens,
+        "local_hf_max_new_tokens": args.local_hf_max_new_tokens,
+        "keep_rollout_on_gpu": args.keep_rollout_on_gpu,
+        "rollout_elapsed_s": round(rollout_elapsed, 3),
+        "generated_tokens_mean": round(sum(generated_tokens) / max(1, len(generated_tokens)), 3),
+        "generated_tokens_max": max(generated_tokens) if generated_tokens else 0,
+        "peak_mem_gb": round(torch.cuda.max_memory_allocated() / 1024**3, 3),
+        "setup_sync_stats": setup_sync_stats,
+        "post_rollout_sync_elapsed_s": round(update_elapsed, 3),
+        "post_rollout_sync_stats": dict(strategy.last_separate_hf_rollout_sync_stats or {}),
+    }
+
+
 def run_generate(actor, batch, chunk_size: int, args, tokenizer, device: torch.device):
     generated_tokens = []
     torch.cuda.empty_cache()
@@ -256,12 +344,27 @@ def main():
     use_gc = args.mode.endswith("gc") or args.mode == "fsdp_train_gc"
     if args.mode in {"raw_eval_no_gc", "raw_train_no_gc", "fsdp_train_no_gc", "fsdp_eval_no_gc"}:
         use_gc = False
+    if args.mode == "fsdp_separate_rollout":
+        train_mode = True
+        use_gc = True
 
     if use_fsdp:
-        strategy = get_strategy(make_fsdp_args())
+        ensure_single_process_fsdp_env()
+        strategy = get_strategy(
+            make_fsdp_args(
+                local_hf_generate_max_batch_size=args.chunk_size if args.mode == "fsdp_separate_rollout" else 0,
+                local_hf_max_new_tokens=args.local_hf_max_new_tokens,
+                enable_engine_sleep=args.mode == "fsdp_separate_rollout",
+                hf_separate_rollout_actor=args.mode == "fsdp_separate_rollout",
+                hf_separate_rollout_keep_on_gpu=args.keep_rollout_on_gpu and args.mode == "fsdp_separate_rollout",
+            )
+        )
         rank, world_size = world_info()
     else:
         strategy = None
+
+    if use_fsdp:
+        prepare_ursa_runtime_for_inference_engines(strategy)
 
     actor = load_actor(args.model_path, device, use_flash_attn=False)
     tokenizer, processor = load_actor_tokenizer_processor(
@@ -272,29 +375,54 @@ def main():
     )
     maybe_configure_gc(actor, use_gc)
 
+    rollout_actor = None
+
     if use_fsdp:
         actor = strategy.prepare_model(actor, is_training=True)
+        if args.mode == "fsdp_separate_rollout":
+            rollout_actor = load_actor(args.model_path, device, use_flash_attn=False)
+            maybe_configure_gc(rollout_actor, enabled=False)
+            rollout_actor = strategy.prepare_model(
+                rollout_actor,
+                is_training=False,
+                shard_size=-1,
+                reshard_after_forward=False,
+            )
+            rollout_actor.gradient_checkpointing_disable()
+            rollout_actor.eval()
+            strategy.offload_model(rollout_actor)
+            strategy.setup_inference_engine(
+                args=strategy.args,
+                engine_type="hf",
+                actor=actor,
+                rollout_actor=rollout_actor,
+                tokenizer=tokenizer,
+                processor=processor,
+            )
     actor.train(mode=train_mode)
 
     prompts, images = build_prompts_and_images(processor, records, args.local_samples)
     batch = tensorize(processor, prompts, images, device)
 
-    elapsed, generated_tokens, peak_mem_gb = run_generate(
-        actor=actor,
-        batch=batch,
-        chunk_size=args.chunk_size,
-        args=args,
-        tokenizer=tokenizer,
-        device=device,
-    )
+    if args.mode == "fsdp_separate_rollout":
+        summary = probe_separate_rollout(strategy, actor, rollout_actor, processor, tokenizer, batch, prompts, images, args)
+    else:
+        elapsed, generated_tokens, peak_mem_gb = run_generate(
+            actor=actor,
+            batch=batch,
+            chunk_size=args.chunk_size,
+            args=args,
+            tokenizer=tokenizer,
+            device=device,
+        )
 
-    elapsed_tensor = torch.tensor([elapsed], device=device, dtype=torch.float64)
-    peak_mem_tensor = torch.tensor([peak_mem_gb], device=device, dtype=torch.float64)
-    if dist.is_available() and dist.is_initialized():
-        dist.all_reduce(elapsed_tensor, op=dist.ReduceOp.MAX)
-        dist.all_reduce(peak_mem_tensor, op=dist.ReduceOp.MAX)
+        elapsed_tensor = torch.tensor([elapsed], device=device, dtype=torch.float64)
+        peak_mem_tensor = torch.tensor([peak_mem_gb], device=device, dtype=torch.float64)
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(elapsed_tensor, op=dist.ReduceOp.MAX)
+            dist.all_reduce(peak_mem_tensor, op=dist.ReduceOp.MAX)
 
-    summary = summarize(args, float(elapsed_tensor.item()), generated_tokens, float(peak_mem_tensor.item()))
+        summary = summarize(args, float(elapsed_tensor.item()), generated_tokens, float(peak_mem_tensor.item()))
     if rank == 0:
         print(json.dumps(summary, ensure_ascii=False))
         if args.output_json:
