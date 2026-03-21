@@ -230,6 +230,28 @@ class PPOTrainer(ABC):
             log_dir = os.path.join(self.strategy.args.use_tensorboard, strategy.args.wandb_run_name)
             self._tensorboard = SummaryWriter(log_dir=log_dir)
 
+    def _update_wandb_summary(self, logs: Dict[str, Any]) -> None:
+        if self._wandb is None or not self.strategy.is_rank_0() or not logs:
+            return
+
+        summary_logs = {}
+        for key, value in logs.items():
+            if isinstance(value, torch.Tensor):
+                if value.numel() != 1:
+                    continue
+                value = value.item()
+            elif hasattr(value, "item") and not isinstance(value, (str, bytes)):
+                try:
+                    value = value.item()
+                except (TypeError, ValueError):
+                    pass
+
+            if isinstance(value, (int, float, bool, str)):
+                summary_logs[key] = value
+
+        if summary_logs and self._wandb.run is not None:
+            self._wandb.run.summary.update(summary_logs)
+
     def fit(
         self,
         args,
@@ -655,22 +677,29 @@ class PPOTrainer(ABC):
 
             # Wandb logging
             if self._wandb is not None and self.strategy.is_rank_0():
+                summary_logs = {}
+
                 # Log rollout metrics with rollout/ prefix
                 if rollout_metrics:
                     rollout_logs = {f"rollout/{k}": v for k, v in rollout_metrics.items()}
                     rollout_logs["rollout/global_step"] = global_step
                     self._wandb.log(rollout_logs)
+                    summary_logs.update(rollout_logs)
 
                 # Log training metrics with train/ prefix
                 if train_metrics:
                     train_logs = {f"train/{k}": v for k, v in train_metrics.items()}
                     train_logs["train/global_step"] = global_step
                     self._wandb.log(train_logs)
+                    summary_logs.update(train_logs)
 
                 # Log performance stats
                 if self.experience_maker.perf_stats is not None:
                     perf_logs = {f"perf/experience_maker/{k}": v for k, v in self.experience_maker.perf_stats.items()}
                     self._wandb.log(perf_logs)
+                    summary_logs.update(perf_logs)
+
+                self._update_wandb_summary(summary_logs)
 
             # TensorBoard logging
             elif self._tensorboard is not None and self.strategy.is_rank_0():
