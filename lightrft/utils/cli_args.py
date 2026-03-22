@@ -147,14 +147,6 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="Interval (in training steps) for plotting and saving the generated sequence length distribution. "
         "Only effective if `--log_dir` is set.",
     )
-    parser.add_argument(
-        "--wandb_heartbeat_interval_secs",
-        type=int,
-        default=60,
-        help="Emit lightweight W&B live heartbeat logs every N seconds during long rollout/training phases. "
-        "Set <= 0 to disable these intermediate heartbeat updates.",
-    )
-
     # for rewards models
     parser.add_argument(
         "--rm_use_engine",

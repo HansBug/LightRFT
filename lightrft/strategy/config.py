@@ -140,10 +140,6 @@ class StrategyConfig:
     plot_every: int = -1
     # (bool): Use TensorBoard for logging, defaults to False
     use_tensorboard: bool = False
-    # (int): Interval in seconds for lightweight W&B live heartbeat logs during long-running rollout/training phases.
-    # Set <= 0 to disable heartbeat logs.
-    wandb_heartbeat_interval_secs: int = 60
-
     # Additional arguments for backward compatibility
     # (Dict[str, Any]): Extra arguments for backward compatibility, defaults to {}
     extra_args: Dict[str, Any] = field(default_factory=dict)

@@ -242,10 +242,6 @@ class StrategyBase(ABC):
         self.time_steps = defaultdict(int)
 
         self._profile_step = 0
-        self._wandb_live_step = 0
-        self._wandb_last_heartbeat_time = 0.0
-        self._wandb_context_global_step = None
-        self._wandb_context_episode = None
 
         # initialize distributed environment
         self.setup_distributed(timeout=timedelta(minutes=60))
@@ -272,75 +268,6 @@ class StrategyBase(ABC):
         np.random.seed(seed)
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
-
-    def set_wandb_progress_context(self, global_step: Optional[int] = None, episode: Optional[int] = None) -> None:
-        self._wandb_context_global_step = global_step
-        self._wandb_context_episode = episode
-
-    @staticmethod
-    def _coerce_wandb_value(value: Any) -> Any:
-        if isinstance(value, torch.Tensor):
-            if value.numel() != 1:
-                return None
-            value = value.item()
-        elif hasattr(value, "item") and not isinstance(value, (str, bytes)):
-            try:
-                value = value.item()
-            except (TypeError, ValueError):
-                pass
-
-        if isinstance(value, (int, float, bool, str)):
-            return value
-        return None
-
-    def _log_wandb_live_metrics(self, force: bool = False, **metrics: Any) -> None:
-        interval = int(getattr(self.config, "wandb_heartbeat_interval_secs", 0) or 0)
-        if interval <= 0 or not getattr(self.args, "use_wandb", None) or not self.is_rank_0():
-            return
-
-        now = time.time()
-        if not force and self._wandb_last_heartbeat_time > 0 and (now - self._wandb_last_heartbeat_time) < interval:
-            return
-
-        try:
-            import wandb
-        except ImportError:
-            return
-
-        if wandb.run is None:
-            return
-
-        history_logs: Dict[str, Any] = {}
-        summary_logs: Dict[str, Any] = {}
-
-        self._wandb_live_step += 1
-        history_logs["live/heartbeat_step"] = self._wandb_live_step
-        history_logs["live/wall_time_unix"] = now
-        summary_logs["live/heartbeat_step"] = self._wandb_live_step
-        summary_logs["live/wall_time_unix"] = now
-        summary_logs["live/last_update_time"] = datetime.fromtimestamp(now).isoformat()
-
-        if self._wandb_context_global_step is not None:
-            history_logs["live/global_step"] = self._wandb_context_global_step
-            summary_logs["live/global_step"] = self._wandb_context_global_step
-        if self._wandb_context_episode is not None:
-            history_logs["live/episode"] = self._wandb_context_episode
-            summary_logs["live/episode"] = self._wandb_context_episode
-
-        for key, value in metrics.items():
-            coerced = self._coerce_wandb_value(value)
-            if coerced is None:
-                continue
-            summary_logs[f"live/{key}"] = coerced
-            if isinstance(coerced, (int, float, bool)):
-                history_logs[f"live/{key}"] = coerced
-
-        wandb.log(history_logs, step=self._wandb_live_step, commit=True)
-        wandb.run.summary.update(summary_logs)
-        self._wandb_last_heartbeat_time = now
-
-    def log_wandb_live_metrics(self, force: bool = False, **metrics: Any) -> None:
-        self._log_wandb_live_metrics(force=force, **metrics)
 
     def setup_distributed(self, timeout: Optional[timedelta] = None, num_gpu_per_node: int = 8) -> None:
         """
@@ -1403,18 +1330,8 @@ class StrategyBase(ABC):
                     return tensor[start:end]
 
                 engine_outputs = []
-                total_chunks = math.ceil(len(normalized_prompt_ids) / max_batch_size)
-                rollout_t0 = time.time()
-                self._log_wandb_live_metrics(
-                    force=True,
-                    phase="rollout_generate_start",
-                    rollout_total_samples=len(normalized_prompt_ids),
-                    rollout_total_chunks=total_chunks,
-                    local_hf_generate_max_batch_size=max_batch_size,
-                )
                 for start in range(0, len(normalized_prompt_ids), max_batch_size):
                     end = min(start + max_batch_size, len(normalized_prompt_ids))
-                    chunk_idx = start // max_batch_size + 1
                     batch_outputs, chunk_elapsed_s = _run_local_hf_batch(
                         normalized_prompt_ids[start:end],
                         batch_pixel_values=_slice_modal_tensor(pixel_values, images_prefix, start, end),
@@ -1423,17 +1340,6 @@ class StrategyBase(ABC):
                         batch_video_grid_thw=_slice_modal_tensor(video_grid_thw, videos_prefix, start, end),
                     )
                     engine_outputs.extend(batch_outputs)
-                    self._log_wandb_live_metrics(
-                        force=(chunk_idx == total_chunks),
-                        phase="rollout_generate_chunk",
-                        rollout_total_samples=len(normalized_prompt_ids),
-                        rollout_completed_samples=end,
-                        rollout_total_chunks=total_chunks,
-                        rollout_completed_chunks=chunk_idx,
-                        rollout_last_chunk_batch_size=end - start,
-                        rollout_last_chunk_elapsed_s=chunk_elapsed_s,
-                        rollout_elapsed_s=round(time.time() - rollout_t0, 4),
-                    )
                 return engine_outputs
 
             batch_outputs, chunk_elapsed_s = _run_local_hf_batch(
@@ -1442,17 +1348,6 @@ class StrategyBase(ABC):
                 batch_image_grid_thw=image_grid_thw,
                 batch_pixel_values_videos=pixel_values_videos,
                 batch_video_grid_thw=video_grid_thw,
-            )
-            self._log_wandb_live_metrics(
-                force=True,
-                phase="rollout_generate_single_batch",
-                rollout_total_samples=len(normalized_prompt_ids),
-                rollout_completed_samples=len(normalized_prompt_ids),
-                rollout_total_chunks=1,
-                rollout_completed_chunks=1,
-                rollout_last_chunk_batch_size=len(normalized_prompt_ids),
-                rollout_last_chunk_elapsed_s=chunk_elapsed_s,
-                rollout_elapsed_s=chunk_elapsed_s,
             )
             return batch_outputs
         else:

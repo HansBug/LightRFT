@@ -435,7 +435,6 @@ torchrun \
     --local_hf_generate_max_batch_size ${LOCAL_HF_GENERATE_MAX_BATCH_SIZE} \
     --local_hf_max_new_tokens ${LOCAL_HF_MAX_NEW_TOKENS} \
     --enable_engine_sleep \
-    --wandb_heartbeat_interval_secs ${WANDB_HEARTBEAT_INTERVAL_SECS} \
     "${HF_ROLLOUT_ARGS[@]}" \
     --system_prompt "${SYSTEM_PROMPT}" \
     --l2 1.0e-2 \
