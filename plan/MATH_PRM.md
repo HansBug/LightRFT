@@ -1516,6 +1516,34 @@ Checklist：
 - runtime eval 的目标不是论文分数，而是 **训练趋势是否朝正确方向前进**
 - 最终保留下来的指标，必须在 `examples/math_prm/README.md` 与 `examples/math_prm/README_zh.md` 中逐项解释
 
+### 9.0 当前优先修复项目
+
+在第 `9` 节范围内，当前优先级按以下顺序固定：
+
+1. **精简 W&B 主看板并补上 runtime eval**
+   - 目标：
+     - 把 `train/*` 主面板收敛到参考 `Geo3K` run 同量级的约 `22` 项
+     - 把 `rollout/*` 主面板收敛到 `7` 项
+     - 补上不超过 `8` 项的 `eval/*` runtime eval
+   - 交付：
+     - allowlist 级别的日志收口
+     - 独立于训练 rollout 的 runtime eval 生成参数
+     - README 双语指标说明
+   - 原因：
+     - 当前主看板信息过宽，已经影响对真实训练状态的判断
+     - 在没有 runtime eval 的情况下，只看 train/rollout 很难区分“真实改善”和“训练内波动”
+
+2. **修复当前 `y9sulzln` 实验暴露出的训练质量与稳定性问题**
+   - 目标：
+     - 让默认 `math_psgrpo` 主入口不再停留在“前期可学到一点、中段失稳、后段部分恢复但未稳定收敛”的状态
+   - 交付：
+     - 对 run `y9sulzln` 的复盘结论
+     - 明确该 run 反映出来的主问题与次问题
+     - 将其转化为后续代码与实验层的修复目标
+   - 原因：
+     - 当前这轮 run 并不能支持“已经收敛”这个判断
+     - 如果不先明确它坏在哪里，后面即使日志面板变干净，也只是在更清楚地看一个不健康训练
+
 ### 9.1 收口目标
 
 上线目标按 namespace 控制为：
@@ -2307,3 +2335,217 @@ README 中需要逐项解释最终保留下来的每个指标，至少说明：
 - 文档：
   - `README.md` 与 `README_zh.md` 对最终保留指标逐项解释
   - 明确指出哪些诊断项被降为 debug-only 指标
+
+### 9.12 Run `y9sulzln` 复盘与后续修复目标
+
+本小节记录对当前实验：
+
+- W&B run: `hansbug/LightRFT-URSA8B-Stage3/y9sulzln`
+- URL: `https://wandb.ai/hansbug/LightRFT-URSA8B-Stage3/runs/y9sulzln`
+
+的观察结论，并将它转化为后续需要修复的项目。
+
+#### 9.12.1 当前状态判断
+
+截至本次检查时，该 run 仍处于：
+
+- `state = running`
+- `rollout/global_step = 154`
+- `rollout/episode = 1`
+
+因此当前不能把它判断为“已经收敛”。
+
+更准确的判断是：
+
+- 这轮训练 **没有形成稳定收敛平台**
+- 它呈现出“前期表现尚可 -> 中段明显失稳 -> 后段部分恢复，但未回到最好窗口”的形态
+- 当前更像“仍在波动学习，且健康性不足”，而不是“已经训练完成并收敛”
+
+#### 9.12.2 关键观测结论
+
+按 `rollout/*` 核心指标粗分窗口，表现为：
+
+##### 前段（早期窗口）
+
+- `rollout/reward` 均值约 `0.448`
+- `rollout/outcome_correct` 均值约 `0.491`
+- `rollout/has_drop_moment` 均值约 `0.443`
+
+说明：
+
+- 训练前段并非完全学不动
+- 模型曾经达到过一个中等可接受的质量区间
+
+##### 中段（失稳窗口）
+
+- `rollout/reward` 均值掉到约 `0.381`
+- `rollout/outcome_correct` 均值掉到约 `0.411`
+- `train/kl` 均值抬到约 `195`
+
+说明：
+
+- 中段出现了明显退化
+- 不是“稳定上升后收敛”，而是训练中途把已经学到的一部分东西又损失掉了
+
+##### 后段（部分恢复窗口）
+
+- `rollout/reward` 均值约 `0.419`
+- `rollout/outcome_correct` 均值约 `0.454`
+- 相比中段有恢复，但仍低于前段均值
+
+说明：
+
+- 后段不是持续恶化，而是能恢复一部分
+- 但恢复后仍未超过最好窗口，因此不能视为已收敛
+
+#### 9.12.3 最好窗口与最差窗口
+
+##### 最好窗口特征
+
+在靠后但非最后的局部窗口中，曾出现：
+
+- `rollout/reward ≈ 0.50 ~ 0.53`
+- `rollout/outcome_correct ≈ 0.55 ~ 0.61`
+- `rollout/has_drop_moment ≈ 0.30 ~ 0.46`
+
+说明：
+
+- 当前链路并不是完全达不到较好状态
+- 模型一度能进入“答案质量和过程稳定性同时改善”的窗口
+- 但这个窗口没有稳定保持住
+
+##### 最差窗口特征
+
+最差点表现非常典型：
+
+- `rollout/reward = 0.0078`
+- `rollout/outcome_correct = 0.0156`
+- `rollout/has_drop_moment = 0.7969`
+- `rollout/model_reward = 0.1263`
+- `rollout/response_length = 318.5`
+- `rollout/answer_extraction_failed = 0.1875`
+
+说明：
+
+- 这不是单纯“答案暂时答错一点”
+- 而是：
+  - 最终答案质量很差
+  - 过程质量显著变差
+  - 输出长度失控拉长
+  - 答案抽取失败比例抬升
+
+#### 9.12.4 当前 run 反映出的主问题排序
+
+基于这轮 run，本计划将后续修复问题按如下优先级排序：
+
+##### 主问题 1：输出格式与答案抽取仍不够稳定
+
+证据：
+
+- `response_length` 高时，`answer_extraction_failed` 也明显更高
+- 最差窗口中出现了“更长输出 + 更高抽取失败 + 更差 reward/correctness”的组合
+
+当前判断：
+
+- 这轮里“输出变长”更多时候不像是学会了更完整的 CoT
+- 更像是：
+  - structured output 不稳
+  - stop 条件不稳
+  - 最终 answer marker 或抽取链路偶尔失效
+
+修复目标：
+
+- 降低 `answer_extraction_failed`
+- 把 `response_length` 拉回稳定合理区间
+- 避免长输出与质量下降继续绑定出现
+
+##### 主问题 2：`math_psgrpo` 的过程质量仍未真正稳定下来
+
+证据：
+
+- 即使在后段恢复后，`has_drop_moment` 仍经常在 `0.4 ~ 0.5` 一带
+- 最差窗口中 `has_drop_moment` 更是抬到极高水平
+
+当前判断：
+
+- 当前训练并不是只缺“把答案做对”
+- 同时还缺“把 reasoning path 稳下来”
+- 这说明 `math_psgrpo` 路径虽然已经接通，但还没有把策略稳定推向“正确且不掉点”的区间
+
+修复目标：
+
+- 让 `outcome_correct` 上升时，`has_drop_moment` 不再同步恶化
+- 逐步把 `has_drop_moment` 压到明显低于当前 run 的水平
+
+##### 次问题 3：训练稳定性一般，KL 中段有异常尖峰
+
+证据：
+
+- 中段出现明显 `train/kl` 尖峰
+- 历史中存在极端高值，远超正常可读范围
+
+当前判断：
+
+- `kl` 不是这轮 run 唯一的问题来源
+- 但它说明训练中段确实存在更新不稳
+- 中段质量回撤与 KL 异常并存，不能忽略
+
+修复目标：
+
+- 降低中段大尖峰出现概率
+- 避免“曾经学到一点 -> 中途大幅回撤 -> 后面再缓慢补回来”的训练轨迹
+
+#### 9.12.5 当前 run 不支持哪些乐观结论
+
+基于以上观察，当前 run **不支持** 以下结论：
+
+- “已经收敛”
+- “reward 在稳定上升”
+- “当前默认主入口已经健康”
+- “只差加 eval，不差训练质量本身”
+
+当前 run 最多只能支持：
+
+- 当前链路能跑通
+- 当前链路能偶尔进入较好窗口
+- 但训练质量和稳定性都还没有被真正固定住
+
+#### 9.12.6 将该 run 转化为后续修复项目
+
+从工程推进上，应把 `y9sulzln` 暴露的问题转化成一个明确的后续项目：
+
+项目名建议：
+
+- `修复 math_prm 默认主入口的训练质量与稳定性`
+
+该项目必须排在：
+
+- “精简 W&B 主看板并补上 runtime eval”
+
+之后立即推进，而不是继续往后拖。
+
+原因：
+
+- 如果不先把日志面板收口，很难高效判断训练到底坏在哪里
+- 但如果只做日志收口，不把这轮 run 暴露出的训练质量问题立为明确修复项，后续仍可能只是更清楚地观察一个不健康训练
+
+#### 9.12.7 后续修复时的重点观察项
+
+当后续开始修复这类训练质量问题时，至少应持续盯住：
+
+- `rollout/reward`
+- `rollout/outcome_correct`
+- `rollout/has_drop_moment`
+- `rollout/model_reward`
+- `rollout/response_length`
+- `rollout/answer_extraction_failed`
+- `train/kl`
+
+理想修复结果应表现为：
+
+- `reward` 上升
+- `outcome_correct` 上升
+- `has_drop_moment` 下降
+- `answer_extraction_failed` 下降
+- `response_length` 回到稳定合理区间
+- `kl` 不再出现中段极端尖峰
