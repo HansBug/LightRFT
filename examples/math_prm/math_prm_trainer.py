@@ -1,4 +1,7 @@
+from contextlib import contextmanager
 from typing import Dict
+
+import torch
 
 from lightrft.trainer.spmd_ppo_trainer import SPMDPPOTrainerVL
 
@@ -35,12 +38,69 @@ class MathPRMSPMDPPOTrainerVL(SPMDPPOTrainerVL):
         "advantages_std": ("advantages_std",),
         "ptx_loss": ("ptx_loss",),
     }
+    _EVAL_KEY_SOURCES = {
+        "reward": ("reward", "reward_mean"),
+        "outcome_correct": ("outcome_correct", "outcome_correct_mean"),
+        "has_drop_moment": ("has_drop_moment", "has_drop_moment_mean"),
+        "model_reward": ("model_reward", "model_reward_mean"),
+        "response_length": ("response_length", "response_length_mean"),
+        "answer_extraction_failed": ("answer_extraction_failed", "answer_extraction_failed_mean"),
+    }
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._train_generate_kwargs = dict(self.generate_kwargs)
+        self._eval_generate_kwargs = self._build_eval_generate_kwargs()
         if self._wandb is not None and self.strategy.is_rank_0():
             self._wandb.define_metric("rollout/*", step_metric=None, step_sync=False, overwrite=True)
             self._wandb.define_metric("train/*", step_metric=None, step_sync=False, overwrite=True)
+            self._wandb.define_metric("eval/train_step")
+            self._wandb.define_metric("eval/*", step_metric="eval/train_step", step_sync=True, overwrite=True)
+
+    def _build_eval_generate_kwargs(self) -> Dict:
+        eval_generate_kwargs = dict(self._train_generate_kwargs)
+        eval_generate_kwargs["do_sample"] = bool(getattr(self.strategy.args, "eval_do_sample", False))
+        eval_generate_kwargs["max_new_tokens"] = (
+            getattr(self.strategy.args, "eval_generate_max_len", None) or
+            self._train_generate_kwargs.get("max_new_tokens")
+        )
+        eval_generate_kwargs["temperature"] = getattr(self.strategy.args, "eval_temperature", 0.0)
+        eval_generate_kwargs["top_p"] = getattr(self.strategy.args, "eval_top_p", 1.0)
+        eval_generate_kwargs["top_k"] = getattr(self.strategy.args, "eval_top_k", -1)
+        eval_generate_kwargs["repetition_penalty"] = getattr(self.strategy.args, "eval_repetition_penalty", 1.0)
+        eval_generate_kwargs["no_repeat_ngram_size"] = getattr(
+            self.strategy.args,
+            "eval_no_repeat_ngram_size",
+            0,
+        )
+        return eval_generate_kwargs
+
+    @contextmanager
+    def _runtime_eval_context(self):
+        original_generate_kwargs = self.generate_kwargs
+        original_n_samples = self.strategy.args.n_samples_per_prompt
+        original_advantage_estimator = self.strategy.args.advantage_estimator
+        original_config_n_samples = getattr(self.strategy.config, "n_samples_per_prompt", None)
+        original_config_advantage_estimator = getattr(self.strategy.config, "advantage_estimator", None)
+
+        self.generate_kwargs = dict(self._eval_generate_kwargs)
+        self.strategy.args.n_samples_per_prompt = max(1, int(getattr(self.strategy.args, "eval_n_samples_per_prompt", 1)))
+        self.strategy.args.advantage_estimator = "reinforce"
+        if original_config_n_samples is not None:
+            self.strategy.config.n_samples_per_prompt = self.strategy.args.n_samples_per_prompt
+        if original_config_advantage_estimator is not None:
+            self.strategy.config.advantage_estimator = "reinforce"
+
+        try:
+            yield
+        finally:
+            self.generate_kwargs = original_generate_kwargs
+            self.strategy.args.n_samples_per_prompt = original_n_samples
+            self.strategy.args.advantage_estimator = original_advantage_estimator
+            if original_config_n_samples is not None:
+                self.strategy.config.n_samples_per_prompt = original_config_n_samples
+            if original_config_advantage_estimator is not None:
+                self.strategy.config.advantage_estimator = original_config_advantage_estimator
 
     def _build_rollout_metrics(self, logs_dict: Dict[str, float]) -> Dict[str, float]:
         rollout_metrics = {}
@@ -59,6 +119,54 @@ class MathPRMSPMDPPOTrainerVL(SPMDPPOTrainerVL):
                     train_metrics[target_key] = logs_dict[source_key]
                     break
         return train_metrics
+
+    def _build_eval_metrics(self, raw_eval_metrics: Dict[str, float]) -> Dict[str, float]:
+        eval_metrics = {}
+        for target_key, source_keys in self._EVAL_KEY_SOURCES.items():
+            for source_key in source_keys:
+                if source_key in raw_eval_metrics:
+                    eval_metrics[target_key] = raw_eval_metrics[source_key]
+                    break
+        return eval_metrics
+
+    def _aggregate_eval_metrics(self, raw_eval_metrics: Dict[str, float]) -> Dict[str, float]:
+        if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+            return raw_eval_metrics
+
+        gathered_metrics = [None] * torch.distributed.get_world_size()
+        torch.distributed.all_gather_object(gathered_metrics, raw_eval_metrics or {})
+
+        total_samples = sum(float(metrics.get("num_samples", 0.0)) for metrics in gathered_metrics if metrics)
+        if total_samples <= 0:
+            return {}
+
+        aggregated_metrics = {"num_samples": total_samples}
+        mean_keys = {
+            key
+            for metrics in gathered_metrics
+            if metrics
+            for key in metrics.keys()
+            if key.endswith("_mean")
+        }
+        for key in mean_keys:
+            weighted_sum = 0.0
+            for metrics in gathered_metrics:
+                if not metrics or key not in metrics:
+                    continue
+                weighted_sum += float(metrics["num_samples"]) * float(metrics[key])
+            aggregated_metrics[key] = weighted_sum / total_samples
+        return aggregated_metrics
+
+    def evaluate(self, eval_dataloader, global_step):
+        with self._runtime_eval_context():
+            raw_eval_metrics = super().evaluate(eval_dataloader, global_step)
+        aggregated_eval_metrics = self._aggregate_eval_metrics(raw_eval_metrics)
+        eval_metrics = self._build_eval_metrics(aggregated_eval_metrics)
+        if self.strategy.is_rank_0() and eval_metrics:
+            self.strategy.print(f"Aggregated runtime eval metrics (Step {global_step}):")
+            for key, value in eval_metrics.items():
+                self.strategy.print(f"  {key}: {value:.4f}")
+        return eval_metrics
 
     def save_logs_and_checkpoints(self, args, global_step, step_bar, logs_dict={}, client_states={}, episode=0):
         if global_step % args.logging_steps == 0:
@@ -96,10 +204,8 @@ class MathPRMSPMDPPOTrainerVL(SPMDPPOTrainerVL):
                 if self._wandb is not None:
                     eval_logs = {}
                     for key, value in raw_eval_metrics.items():
-                        clean_key = key.replace("eval_", "") if key.startswith("eval_") else key
-                        eval_logs[f"eval/{clean_key}"] = value
+                        eval_logs[f"eval/{key}"] = value
 
-                    eval_logs["eval/global_step"] = self.eval_step_counter
                     eval_logs["eval/train_step"] = global_step
                     eval_logs["eval/episode"] = episode
 
@@ -109,8 +215,7 @@ class MathPRMSPMDPPOTrainerVL(SPMDPPOTrainerVL):
 
                 elif self._tensorboard is not None:
                     for key, value in raw_eval_metrics.items():
-                        clean_key = key.replace("eval_", "") if key.startswith("eval_") else key
-                        self._tensorboard.add_scalar(f"eval/{clean_key}", value, global_step)
+                        self._tensorboard.add_scalar(f"eval/{key}", value, global_step)
 
         if global_step % args.save_steps == 0:
             tag = f"global_step{global_step}"

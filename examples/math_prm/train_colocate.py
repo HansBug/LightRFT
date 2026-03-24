@@ -110,6 +110,41 @@ def resolve_reference_shard_size(world_size: int, preferred_shard_size: int = 8)
     return candidate
 
 
+def split_runtime_eval_dataset(prompts_data, args, strategy):
+    """
+    Build a deterministic held-out runtime eval split from prompt_data when no
+    explicit eval dataset is provided.
+
+    This follows the paper/plan intent of using a stable in-domain held-out set
+    instead of relying on an optional dataset split name.
+    """
+    if args.eval_holdout_size <= 0 or args.max_eval_samples <= 0:
+        return prompts_data, None
+
+    total_samples = len(prompts_data)
+    if total_samples <= 1:
+        strategy.print("Warning: prompt_data is too small to carve out a held-out runtime eval split.")
+        return prompts_data, None
+
+    eval_size = min(args.eval_holdout_size, args.max_eval_samples, total_samples - 1)
+    if eval_size <= 0:
+        strategy.print("Warning: held-out runtime eval split resolved to zero samples; skipping eval split.")
+        return prompts_data, None
+
+    if not hasattr(prompts_data, "train_test_split"):
+        strategy.print("Warning: prompt_data does not support train_test_split(); skipping held-out runtime eval.")
+        return prompts_data, None
+
+    split = prompts_data.train_test_split(test_size=eval_size, shuffle=True, seed=args.eval_holdout_seed)
+    train_data = split["train"]
+    eval_data = split["test"]
+    strategy.print(
+        "Prepared runtime eval holdout from prompt_data "
+        f"(train={len(train_data)}, eval={len(eval_data)}, seed={args.eval_holdout_seed})."
+    )
+    return train_data, eval_data
+
+
 def load_actor_tokenizer_processor(
     *,
     model_path: str,
@@ -411,6 +446,10 @@ def train(args):
         train_split=args.prompt_split,
     )
     
+    heldout_eval_data = None
+    if not args.eval_data and not args.eval_split:
+        prompts_data, heldout_eval_data = split_runtime_eval_dataset(prompts_data, args, strategy)
+
     prompts_data = prompts_data.select(range(min(args.max_samples, len(prompts_data))))
     prompts_dataset = PromptDatasetVL(prompts_data, tokenizer, processor, args.prompt_max_len, strategy, input_template=args.input_template)
     strategy.print(f"Loaded {len(prompts_dataset)} samples for prompts.")
@@ -433,11 +472,30 @@ def train(args):
                 
                 eval_dataset = PromptDatasetVL(eval_data, tokenizer, processor, args.prompt_max_len, strategy, input_template=args.input_template)
                 eval_dataloader = strategy.setup_dataloader(
-                    eval_dataset, args.rollout_batch_size // strategy.world_size, False, False, collate_fn=eval_dataset.collate_fn
+                    eval_dataset,
+                    args.rollout_batch_size // strategy.world_size,
+                    False,
+                    False,
+                    collate_fn=eval_dataset.collate_fn,
+                    drop_last=False,
                 )
                 strategy.print(f"Evaluation dataset loaded: {len(eval_dataset)} samples")
         else:
             strategy.print("Warning: eval_split specified but no data path available for evaluation.")
+    elif heldout_eval_data is not None:
+        eval_data = heldout_eval_data.select(range(min(args.max_eval_samples, len(heldout_eval_data))))
+        eval_dataset = PromptDatasetVL(
+            eval_data, tokenizer, processor, args.prompt_max_len, strategy, input_template=args.input_template
+        )
+        eval_dataloader = strategy.setup_dataloader(
+            eval_dataset,
+            args.rollout_batch_size // strategy.world_size,
+            False,
+            False,
+            collate_fn=eval_dataset.collate_fn,
+            drop_last=False,
+        )
+        strategy.print(f"Held-out runtime evaluation dataset loaded: {len(eval_dataset)} samples")
 
     # Prepare pretrain dataset
     pretrain_dataloader = None
@@ -792,6 +850,51 @@ if __name__ == "__main__":
     parser.add_argument("--eval_data", type=str, default=None, help="HF evaluation dataset name or path (default: use prompt_data)")
     parser.add_argument("--eval_split", type=str, default="", help="Evaluation data split (default: disabled)")
     parser.add_argument("--max_eval_samples", type=int, default=500, help="Maximum number of samples to evaluate (default: 500)")
+    parser.add_argument(
+        "--eval_holdout_size",
+        type=int,
+        default=500,
+        help="Deterministic held-out eval subset size sampled from prompt_data when eval_data is unset (default: 500)",
+    )
+    parser.add_argument(
+        "--eval_holdout_seed",
+        type=int,
+        default=42,
+        help="Seed for deterministic held-out runtime eval split (default: 42)",
+    )
+    parser.add_argument(
+        "--eval_n_samples_per_prompt",
+        type=int,
+        default=1,
+        help="Number of eval generations per prompt (default: 1)",
+    )
+    parser.add_argument(
+        "--eval_do_sample",
+        action="store_true",
+        default=False,
+        help="Use sampling during runtime eval instead of greedy decoding",
+    )
+    parser.add_argument(
+        "--eval_generate_max_len",
+        type=int,
+        default=None,
+        help="Maximum generation length for runtime eval (default: use generate_max_len)",
+    )
+    parser.add_argument("--eval_temperature", type=float, default=0.0, help="Eval temperature (default: 0.0)")
+    parser.add_argument("--eval_top_p", type=float, default=1.0, help="Eval top-p (default: 1.0)")
+    parser.add_argument("--eval_top_k", type=int, default=-1, help="Eval top-k (default: -1)")
+    parser.add_argument(
+        "--eval_repetition_penalty",
+        type=float,
+        default=1.0,
+        help="Eval repetition penalty (default: 1.0)",
+    )
+    parser.add_argument(
+        "--eval_no_repeat_ngram_size",
+        type=int,
+        default=0,
+        help="Eval no-repeat-ngram size (default: 0)",
+    )
     
     parser.add_argument("--pretrain_data", type=str, default=None, help="HF dataset name or path")
     parser.add_argument(

@@ -151,7 +151,20 @@ else
     LOCAL_HF_GENERATE_MAX_BATCH_SIZE="${LOCAL_HF_GENERATE_MAX_BATCH_SIZE:-0}"
     LOCAL_HF_MAX_NEW_TOKENS="${LOCAL_HF_MAX_NEW_TOKENS:-0}"
 fi
+PATH_TO_YOUR_EVAL_DATASET="${PATH_TO_YOUR_EVAL_DATASET:-}"
 EVAL_SPLIT="${EVAL_SPLIT:-}"
+EVAL_STEPS="${EVAL_STEPS:--1}"
+EVAL_MAX_SAMPLES="${EVAL_MAX_SAMPLES:-500}"
+EVAL_HOLDOUT_SIZE="${EVAL_HOLDOUT_SIZE:-500}"
+EVAL_HOLDOUT_SEED="${EVAL_HOLDOUT_SEED:-42}"
+EVAL_N_SAMPLES="${EVAL_N_SAMPLES:-1}"
+EVAL_DO_SAMPLE="${EVAL_DO_SAMPLE:-0}"
+EVAL_GENERATE_MAX_LEN="${EVAL_GENERATE_MAX_LEN:-${GENERATE_MAX_LEN}}"
+EVAL_TEMPERATURE="${EVAL_TEMPERATURE:-0.0}"
+EVAL_TOP_P="${EVAL_TOP_P:-1.0}"
+EVAL_TOP_K="${EVAL_TOP_K:--1}"
+EVAL_REPETITION_PENALTY="${EVAL_REPETITION_PENALTY:-1.0}"
+EVAL_NO_REPEAT_NGRAM_SIZE="${EVAL_NO_REPEAT_NGRAM_SIZE:-0}"
 USE_URSA_ENGINE_WRAPPER="${USE_URSA_ENGINE_WRAPPER:-1}"
 URSA_ENGINE_CHECKPOINT_DIR="${URSA_ENGINE_CHECKPOINT_DIR:-/data/LightRFT/tmp/ursa_stage3/URSA-8B-engine-ready}"
 SYSTEM_PROMPT="${SYSTEM_PROMPT:-A conversation between the User and Assistant. The User asks a question that may require mathematical or visual reasoning, and the Assistant solves it step by step. Each step MUST begin with \"Step N:\" (e.g. \"Step 1:\", \"Step 2:\") on its own line. After all steps, output exactly one final answer line prefixed with \"†Answer:\" (e.g. \"†Answer: 42\"). Stop immediately after the \"†Answer:\" line and do not output any extra text, repeated answer markers, or additional steps.}"
@@ -355,12 +368,43 @@ if [[ "${ENGINE_TYPE}" == "hf" && "${HF_SEPARATE_ROLLOUT_ACTOR}" == "1" ]]; then
 fi
 
 EVAL_ARGS=()
-if [[ -n "${EVAL_SPLIT}" ]]; then
+if [[ "${EVAL_MAX_SAMPLES}" -gt 0 ]]; then
     EVAL_ARGS=(
-        --eval_split "${EVAL_SPLIT}"
+        --eval_steps "${EVAL_STEPS}"
+        --max_eval_samples "${EVAL_MAX_SAMPLES}"
+        --eval_holdout_size "${EVAL_HOLDOUT_SIZE}"
+        --eval_holdout_seed "${EVAL_HOLDOUT_SEED}"
+        --eval_n_samples_per_prompt "${EVAL_N_SAMPLES}"
+        --eval_generate_max_len "${EVAL_GENERATE_MAX_LEN}"
+        --eval_temperature "${EVAL_TEMPERATURE}"
+        --eval_top_p "${EVAL_TOP_P}"
+        --eval_top_k "${EVAL_TOP_K}"
+        --eval_repetition_penalty "${EVAL_REPETITION_PENALTY}"
+        --eval_no_repeat_ngram_size "${EVAL_NO_REPEAT_NGRAM_SIZE}"
     )
+    if [[ "${EVAL_DO_SAMPLE}" == "1" ]]; then
+        EVAL_ARGS+=(
+            --eval_do_sample
+        )
+    fi
+
+    if [[ -n "${PATH_TO_YOUR_EVAL_DATASET}" ]]; then
+        EVAL_ARGS+=(
+            --eval_data "${PATH_TO_YOUR_EVAL_DATASET}"
+        )
+        echo "[run_grpo_math_prm_ursa_8b.sh] Runtime eval uses explicit eval_data: ${PATH_TO_YOUR_EVAL_DATASET}"
+    elif [[ -n "${EVAL_SPLIT}" ]]; then
+        EVAL_ARGS+=(
+            --eval_split "${EVAL_SPLIT}"
+        )
+        echo "[run_grpo_math_prm_ursa_8b.sh] Runtime eval uses split '${EVAL_SPLIT}'."
+    elif [[ "${EVAL_HOLDOUT_SIZE}" -gt 0 ]]; then
+        echo "[run_grpo_math_prm_ursa_8b.sh] Runtime eval uses a deterministic held-out subset from prompt_data (size=${EVAL_HOLDOUT_SIZE}, seed=${EVAL_HOLDOUT_SEED}) to mirror the paper's fixed in-domain eval protocol."
+    else
+        echo "[run_grpo_math_prm_ursa_8b.sh] Runtime eval disabled because no eval_data/eval_split/heldout subset is configured."
+    fi
 else
-    echo "[run_grpo_math_prm_ursa_8b.sh] Eval split disabled for this run."
+    echo "[run_grpo_math_prm_ursa_8b.sh] Runtime eval disabled because EVAL_MAX_SAMPLES=${EVAL_MAX_SAMPLES}."
 fi
 
 if [[ "${ENGINE_TYPE}" != "hf" && "${USE_URSA_ENGINE_WRAPPER}" == "1" && -d "${PATH_TO_YOUR_BASE_MODEL}" ]]; then
