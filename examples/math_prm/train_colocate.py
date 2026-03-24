@@ -57,9 +57,9 @@ from lightrft.models.actor_language import ActorLanguage
 from lightrft.models.actor_vl import ActorVL
 
 from lightrft.strategy import get_strategy
-from lightrft.trainer.spmd_ppo_trainer import SPMDPPOTrainerVL
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from math_prm_trainer import MathPRMSPMDPPOTrainerVL
 from reward_models_utils import load_reward_models, reward_fn, RECIPE
 
 
@@ -565,7 +565,7 @@ def train(args):
     strategy.report_memory("after setup_inference_engine")
 
     # configure Trainer
-    trainer = SPMDPPOTrainerVL(
+    trainer = MathPRMSPMDPPOTrainerVL(
         strategy,
         actor,
         critic,
