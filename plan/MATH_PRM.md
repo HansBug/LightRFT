@@ -1501,3 +1501,809 @@ Checklist：
 - 再对齐行为
 - 再对齐 reward
 - 最后补筛选数据
+
+---
+
+## 9. W&B 主看板与 Runtime Eval 收口方案
+
+本节只讨论当前 `math_prm` 主训练入口的线上观测面，不讨论论文 benchmark eval，也不讨论 W&B config 字段清理。
+
+当前用户要求已经明确收敛为：
+
+- `train/*` 主看板规模向参考 `Geo3K` run 靠拢
+- `rollout/*` 主看板规模向参考 `Geo3K` run 靠拢
+- `eval/*` 眼下只做 **runtime eval**
+- runtime eval 的目标不是论文分数，而是 **训练趋势是否朝正确方向前进**
+- 最终保留下来的指标，必须在 `examples/math_prm/README.md` 与 `examples/math_prm/README_zh.md` 中逐项解释
+
+### 9.1 收口目标
+
+上线目标按 namespace 控制为：
+
+- `train/*`：目标对齐到参考 `Geo3K` run 的同款面板规模，**总量控制在约 `22` 项**
+- `rollout/*`：**总量控制在 `7` 项**
+- `eval/*`：**不超过 `8` 项**
+
+这里的“对齐 `Geo3K` run”指的是：
+
+- 主看板保留 PPO/GRPO 训练必须看的公共指标
+- 不把 `math_prm` / `math_psgrpo` 的全部诊断量都堆进主面板
+- 数量、层次和阅读负担与参考 run 接近
+
+由于当前离线环境无法直接程序化读取参考 run 的完整字段清单，本计划先按“数量上限 + 指标类型 + 命名口径”对齐；真正落代码前，仍需要再对照一次参考 `Geo3K` 页面做最终字段核对。
+
+### 9.2 主看板设计原则
+
+主看板只保留三类指标：
+
+1. PPO/GRPO 训练状态是否稳定
+2. `math_psgrpo` reward 语义是否朝正确方向变化
+3. 输出长度和答案抽取是否没有明显退化
+
+明确不再把以下内容作为默认主看板的一部分：
+
+- 全量 `reward_metrics/*`
+- 全量 step-level 聚合统计
+- 全量答案抽取/回退/比较器诊断
+- 全量 `perf/experience_maker/*`
+- 只在排障阶段短期有意义、但长期主看板可读性极差的调试项
+
+### 9.3 `rollout/*` 保留集
+
+`rollout/*` 目标收敛到以下 `7` 项：
+
+1. `rollout/reward`
+2. `rollout/reward_std`
+3. `rollout/outcome_correct`
+4. `rollout/has_drop_moment`
+5. `rollout/model_reward`
+6. `rollout/response_length`
+7. `rollout/episode`
+
+说明：
+
+- 对当前默认 label `math_psgrpo`，`rollout/reward` 已经代表最终 PS-GRPO reward，不再额外保留同义的 `rollout/final_reward`
+- `outcome_correct` 是“答案最终是否正确”
+- `has_drop_moment` 是 `math_psgrpo` 特有的过程质量信号，必须保留
+- `model_reward` 保留，是为了观察 PRM step-score 聚合值与最终 reward 是否开始脱钩
+- `response_length` 保留，是为了防止 reward 上升只是长度策略漂移
+- `episode` 保留，是为了和现有训练 UI 的阶段感保持一致
+
+默认从主看板移除的 rollout 诊断项：
+
+- `step_score_min`
+- `step_score_mean`
+- `step_score_last`
+- `step_count`
+- `max_relative_drop`
+- `answer_tag_present`
+- `answer_extraction_failed`
+- `used_answer_fallback`
+- `reference_supported`
+- `used_mathruler`
+- `reference_type_id`
+- `format_reward`
+- `rule_reward`
+
+这些指标不应丢失语义，但应降级到以下位置之一：
+
+- debug-only namespace
+- trajectory / observation 离线分析
+- 短期排障分支的临时仪表盘
+
+#### 9.3.1 `rollout/*` 字段语义与趋势解释
+
+以下解释默认建立在主线 label 为 `math_psgrpo` 的前提下。
+
+##### `rollout/reward`
+
+- 含义：
+  - 当前 rollout 样本的最终 PS-GRPO reward 均值
+  - 在默认 `math_psgrpo` 语义下，单样本 reward 主要落在 `{0.0, 0.5, 1.0}`
+  - `1.0` 表示答案正确且没有 drop-moment
+  - `0.5` 表示答案正确但有 drop-moment
+  - `0.0` 表示答案错误
+- 高/低意味着什么：
+  - 高：整体 rollout 结果更接近“答对且过程稳定”
+  - 低：更多样本落在答错或过程不稳定区间
+- 趋势怎么看：
+  - 持续上升：好，通常意味着 correctness 与 process quality 在同步改善
+  - 长期横盘在很低位置：差，说明训练没有把样本推离错误区
+  - 短期剧烈震荡：常见于 RL 早期，但如果长时间大幅震荡，通常表示优化噪声过大
+- 联合解读：
+  - `reward` 上升且 `outcome_correct` 同步上升：最健康
+  - `reward` 上升但 `outcome_correct` 不动：需要警惕 reward 语义实现、答案抽取或 PRM 诊断口径是否漂移
+
+##### `rollout/reward_std`
+
+- 含义：
+  - 当前 rollout 样本最终 reward 的标准差
+- 高/低意味着什么：
+  - 高：batch 内样本质量差异大，有的很好，有的很差
+  - 低：batch 内 reward 更集中
+- 趋势怎么看：
+  - 训练早期偏高：正常，说明策略还在混合“对/错/半对”状态
+  - 后期如果 `reward` 上升且 `reward_std` 缓慢下降：通常是收敛变稳定
+  - 如果 `reward_std` 很低但 `reward` 也很低：坏的塌缩，表示大家都在一起答错
+  - 如果 `reward_std` 很低且 `reward` 很高：好的收敛，表示大多数样本都稳定变好
+
+##### `rollout/outcome_correct`
+
+- 含义：
+  - 最终答案是否正确的均值，本质上可看作 answer-level accuracy proxy
+- 高/低意味着什么：
+  - 高：更多样本最终答对
+  - 低：更多样本最终答错
+- 趋势怎么看：
+  - 持续上升：明确是好信号
+  - 长期不升：说明训练没有真正提升最终答案质量
+  - 明显下降：应优先视为训练退化，而不是单纯波动
+- 联合解读：
+  - `outcome_correct` 上升但 `has_drop_moment` 也明显上升：说明“更常答对了”，但 reasoning path 还不稳
+
+##### `rollout/has_drop_moment`
+
+- 含义：
+  - 触发相邻 step score 显著下跌事件的样本比例
+  - 是 `math_psgrpo` 对过程稳定性的核心诊断
+- 高/低意味着什么：
+  - 高：更多样本在 reasoning path 中出现“明显掉点”
+  - 低：过程稳定性更好
+- 趋势怎么看：
+  - 下降：好，表示过程质量更稳
+  - 持续上升：差，表示模型虽然可能还能答对，但 reasoning chain 越来越脆
+  - 长期维持高位：说明 process quality 一直没有被真正修好
+- 联合解读：
+  - `outcome_correct` 上升、`has_drop_moment` 下降：最理想
+  - `outcome_correct` 上升、`has_drop_moment` 基本不变：可以接受，表示先把答案做对
+  - `outcome_correct` 上升、`has_drop_moment` 大幅上升：短期可能可接受，但不应视为最终健康态
+
+##### `rollout/model_reward`
+
+- 含义：
+  - PRM 对 step-level reasoning 的聚合分数
+  - 它不是最终 PS-GRPO reward，而是 verifier 视角下的“过程质量/可信度”分数
+- 高/低意味着什么：
+  - 高：PRM 认为轨迹整体更可信
+  - 低：PRM 认为轨迹更不可信
+- 趋势怎么看：
+  - 稳定上升：通常是好事
+  - 上升但 `outcome_correct` 不升：要警惕 PRM 与最终答案 correctness 的脱钩
+  - 持续下降：PRM 认为 reasoning path 质量在退化
+- 联合解读：
+  - `model_reward` 和 `outcome_correct` 同升：好
+  - `model_reward` 升、`has_drop_moment` 也升：PRM 聚合分数可能被局部高分 step 抬高，但过程稳定性未同步改善
+
+##### `rollout/response_length`
+
+- 含义：
+  - 生成回答的平均长度
+- 高/低意味着什么：
+  - 高：平均回答更长
+  - 低：平均回答更短
+- 趋势怎么看：
+  - 前期适度上升：可能是模型开始学会完整输出 step-by-step 结构
+  - 持续失控上升：坏，可能在靠冗长输出刷 reward 或拖慢训练
+  - 突然塌缩很低：坏，可能格式断裂、提早停、答案抽取失败
+- 联合解读：
+  - `response_length` 上升且 `outcome_correct` 同升：可能是正常学习完整 CoT
+  - `response_length` 上升但 `reward/outcome_correct` 不升：更像 verbosity drift
+
+##### `rollout/episode`
+
+- 含义：
+  - 所处训练 episode
+- 高/低意味着什么：
+  - 只是训练进度锚点，没有“高更好/低更好”的含义
+- 趋势怎么看：
+  - 只用于给其它曲线提供阶段上下文
+
+### 9.4 `train/*` 保留策略
+
+`train/*` 目标对齐参考 `Geo3K` run 的同款面板规模，**约 `22` 项**。
+
+这里不主张把 `math_prm` 专属诊断塞进 `train/*`，而是以“通用 PPO/GRPO 训练面”优先。保留策略如下：
+
+#### 9.4.1 必保留核心项
+
+以下项应视为不可删减的核心项：
+
+1. `train/policy_loss`
+2. `train/kl`
+3. `train/actor_lr`
+4. `train/critic_loss`
+5. `train/critic_lr`
+6. `train/values`
+7. `train/reward`
+8. `train/return`
+9. `train/response_length`
+10. `train/total_length`
+11. `train/num_actions`
+12. `train/episode`
+
+说明：
+
+- 这些项覆盖了 PPO/GRPO 最基本的优化、KL 约束、value 分支状态和长度状态
+- `train/reward` / `train/return` / `train/response_length` 虽然来自 experience 侧，但在训练面里保留它们，有助于和参考 `Geo3K` run 的阅读习惯对齐
+
+#### 9.4.2 预留给通用 PPO 诊断的补位项
+
+为了把 `train/*` 规模收敛到参考 run 的约 `22` 项，可以优先保留或补齐下列 **通用 PPO** 诊断项，而不是引入 `math_prm` 特有杂项：
+
+- `train/ptx_loss`
+- `train/approx_kl`
+- `train/clipfrac`
+- `train/ratio_mean`
+- `train/ratio_max`
+- `train/advantages`
+- `train/returns`
+- `train/values_std`
+- `train/reward_std`
+- `train/return_std`
+
+原则：
+
+- 如果某项已经在当前代码链路中稳定存在，优先保留
+- 如果某项不存在，但参考 `Geo3K` run 有同类 PPO 诊断项，则优先补这类公共项
+- 不允许为了凑满 `22` 项而把 `math_psgrpo` 的所有 reward 诊断硬塞进 `train/*`
+
+#### 9.4.2A 当前计划保留的 `train/*` 目标字段清单
+
+为避免“约 `22` 项”在后续实现阶段再次发散，这里先把目标字段清单定为：
+
+1. `train/policy_loss`
+2. `train/kl`
+3. `train/actor_lr`
+4. `train/critic_loss`
+5. `train/critic_lr`
+6. `train/values`
+7. `train/values_std`
+8. `train/reward`
+9. `train/reward_std`
+10. `train/return`
+11. `train/return_std`
+12. `train/response_length`
+13. `train/total_length`
+14. `train/num_actions`
+15. `train/approx_kl`
+16. `train/clipfrac`
+17. `train/ratio_mean`
+18. `train/ratio_max`
+19. `train/advantages`
+20. `train/advantages_std`
+21. `train/ptx_loss`
+22. `train/episode`
+
+补充约束：
+
+- `global_step` 作为 step 轴锚点存在，但不计入“`22` 个主字段”名额
+- `ptx_loss` 只在 PTX 打开时显示；若该 run 未启用 PTX，这个槽位可为空，不允许用 `math_prm` 特有长尾诊断去替补
+- `values_std`、`reward_std`、`return_std`、`approx_kl`、`clipfrac`、`ratio_mean`、`ratio_max`、`advantages`、`advantages_std` 属于需要对齐或补齐的通用 PPO 诊断项
+
+#### 9.4.2B `train/*` 字段语义与趋势解释
+
+##### `train/policy_loss`
+
+- 含义：
+  - actor 的策略优化目标值
+- 高/低意味着什么：
+  - 不能简单理解成“越低越好”或“越高越好”
+  - 它是 PPO 目标函数的数值表现，受 advantage、ratio clipping、batch 组成共同影响
+- 趋势怎么看：
+  - 平滑波动：正常
+  - 绝对值突然大幅放大并持续震荡：坏，通常表示更新过猛或优势噪声过大
+  - 长期几乎不动且 `reward` 也不动：可能学习停滞
+
+##### `train/kl`
+
+- 含义：
+  - 当前策略与 reference/old policy 的偏离程度
+- 高/低意味着什么：
+  - 高：策略更新更激进
+  - 低：策略更新更保守
+- 趋势怎么看：
+  - 中等、可控：最好
+  - 持续尖峰：差，容易导致训练不稳
+  - 长期过低且 `reward` 不涨：可能更新太保守，学不动
+- 联合解读：
+  - `kl` 升一点、`reward` 也升：常见且合理
+  - `kl` 爆炸、`reward` 反而掉：典型坏信号
+
+##### `train/actor_lr`
+
+- 含义：
+  - actor 学习率
+- 高/低意味着什么：
+  - 只是优化器调度状态
+- 趋势怎么看：
+  - 按 warmup/scheduler 计划变化：正常
+  - 异常跳变：需要查调度器或恢复训练逻辑
+
+##### `train/critic_loss`
+
+- 含义：
+  - critic 对 return 的拟合误差
+- 高/低意味着什么：
+  - 低：critic 拟合更好
+  - 高：critic 拟合更差
+- 趋势怎么看：
+  - 逐步下降或维持稳定低位：好
+  - 持续升高或剧烈抖动：差，value 分支不稳
+  - 快速掉到极低但 `reward/return` 没改善：不一定是好事，也可能是 critic 学到退化常数解
+
+##### `train/critic_lr`
+
+- 含义：
+  - critic 学习率
+- 高/低意味着什么：
+  - 只是优化器调度状态
+- 趋势怎么看：
+  - 应符合 scheduler 预期，不单独代表好坏
+
+##### `train/values`
+
+- 含义：
+  - critic 预测的 value 均值
+- 高/低意味着什么：
+  - 代表 critic 认为当前样本 future return 的平均水平
+- 趋势怎么看：
+  - 应和 `train/return` 大体同向变化
+  - 如果长期和 `train/return` 严重背离：critic 标定有问题
+
+##### `train/values_std`
+
+- 含义：
+  - critic 预测值的离散程度
+- 高/低意味着什么：
+  - 高：critic 对不同样本的打分差异更大
+  - 低：critic 预测更集中
+- 趋势怎么看：
+  - 应大体跟随 `return_std`
+  - 如果 `return_std` 仍高，但 `values_std` 过低：可能是 critic 塌缩
+  - 如果 `values_std` 无端暴涨：可能是 value 不稳
+
+##### `train/reward`
+
+- 含义：
+  - 训练阶段消费到的样本 reward 均值
+  - 对默认 `math_psgrpo` 来说，本质上仍然对应最终 PS-GRPO reward
+- 高/低意味着什么：
+  - 高：样本总体更接近答对且过程稳定
+  - 低：样本总体更差
+- 趋势怎么看：
+  - 趋势解释与 `rollout/reward` 基本一致
+
+##### `train/reward_std`
+
+- 含义：
+  - 训练 batch reward 的离散程度
+- 高/低意味着什么：
+  - 高：batch 内质量参差更大
+  - 低：reward 更集中
+- 趋势怎么看：
+  - 解读方式与 `rollout/reward_std` 一致
+
+##### `train/return`
+
+- 含义：
+  - PPO 实际优化时使用的 return 均值
+  - 会受到 reward shaping、KL、advantage 计算路径影响
+- 高/低意味着什么：
+  - 高：训练目标视角下的总体回报更高
+  - 低：训练目标视角下的总体回报更低
+- 趋势怎么看：
+  - 一般应与 `reward` 大体同向
+  - 若明显偏离 `reward`，通常意味着 KL 或 shaping 在强烈介入
+
+##### `train/return_std`
+
+- 含义：
+  - return 的离散程度
+- 高/低意味着什么：
+  - 高：训练目标值差异更大
+  - 低：训练目标值更集中
+- 趋势怎么看：
+  - 早期偏高正常
+  - 后期若 `return` 变好且 `return_std` 下降，通常代表收敛
+
+##### `train/response_length`
+
+- 含义：
+  - 训练样本回答长度均值
+- 高/低意味着什么：
+  - 高：回答更长
+  - 低：回答更短
+- 趋势怎么看：
+  - 不追求单调高或低，只追求“稳定在任务合理区间”
+  - 快速上升且 `reward` 不升：疑似长度投机
+  - 快速塌缩且 `answer_extraction_failed` 上升：疑似格式/停词异常
+
+##### `train/total_length`
+
+- 含义：
+  - prompt + response 的总长度均值
+- 高/低意味着什么：
+  - 更多是序列预算和显存/吞吐上下文，不直接代表质量
+- 趋势怎么看：
+  - 和 `response_length` 一起看
+  - 持续逼近上限会增加截断与吞吐风险
+
+##### `train/num_actions`
+
+- 含义：
+  - 实际参与优化的 action token 数量均值
+- 高/低意味着什么：
+  - 高：每个样本可训练 token 更多
+  - 低：每个样本可训练 token 更少
+- 趋势怎么看：
+  - 应与 `response_length` 基本同向
+  - 如果与 `response_length` 明显背离，可能是 mask 或截断逻辑有问题
+
+##### `train/approx_kl`
+
+- 含义：
+  - PPO 常见的近似 KL 诊断项
+- 高/低意味着什么：
+  - 高：策略相对旧策略改动更大
+  - 低：策略改动更小
+- 趋势怎么看：
+  - 作用类似 `train/kl`
+  - 与 `train/kl` 长期严重不一致时，要查实现与日志口径
+
+##### `train/clipfrac`
+
+- 含义：
+  - PPO 更新中落入 clipping 区间的比例
+- 高/低意味着什么：
+  - 高：很多样本已在被 clipping，更新开始受限
+  - 低：多数样本仍在未裁剪区域
+- 趋势怎么看：
+  - 中等水平通常最健康
+  - 长期过高：说明更新过激，很多样本被硬裁
+  - 长期接近零且 `reward` 不涨：可能更新过弱
+
+##### `train/ratio_mean`
+
+- 含义：
+  - 新旧策略概率比值的均值
+- 高/低意味着什么：
+  - 接近 `1.0`：新旧策略相近
+  - 明显偏离 `1.0`：策略变化更大
+- 趋势怎么看：
+  - 长期围绕 `1.0` 小幅波动：正常
+  - 持续偏离 `1.0` 很多：通常意味着更新太猛或实现有问题
+
+##### `train/ratio_max`
+
+- 含义：
+  - 新旧策略概率比值中的极端值
+- 高/低意味着什么：
+  - 高：存在极端更新样本
+- 趋势怎么看：
+  - 偶发尖峰可以接受
+  - 高频大尖峰：坏，通常比 `ratio_mean` 更早暴露不稳定更新
+
+##### `train/advantages`
+
+- 含义：
+  - advantage 的均值
+- 高/低意味着什么：
+  - 对启用 whitening / normalization 的路径，理论上应接近 `0`
+  - 对未归一化路径，绝对值会更依赖 reward 尺度
+- 趋势怎么看：
+  - 若当前算法/配置会做 advantage normalization，则长期偏离 `0` 需要怀疑实现或日志口径
+  - 若不做 normalization，则它更像 reward 尺度参考，不单独判断好坏
+
+##### `train/advantages_std`
+
+- 含义：
+  - advantage 的离散程度
+- 高/低意味着什么：
+  - 高：样本梯度驱动力差异更大
+  - 低：样本梯度驱动力更集中
+- 趋势怎么看：
+  - 对做 whitening 的路径，通常应稳定在一个受控范围
+  - 持续暴涨：说明训练信号越来越噪
+
+##### `train/ptx_loss`
+
+- 含义：
+  - PTX 辅助监督项损失，仅在混合 PTX 时存在
+- 高/低意味着什么：
+  - 低：监督拟合更好
+  - 高：监督拟合更差
+- 趋势怎么看：
+  - 通常缓慢下降或稳定
+  - 若突然升高，说明 RL 更新可能开始明显破坏语言建模/格式保持能力
+
+##### `train/episode`
+
+- 含义：
+  - 训练 episode
+- 高/低意味着什么：
+  - 只是训练阶段锚点，没有质量好坏含义
+
+#### 9.4.3 不应进入 `train/*` 主看板的内容
+
+以下内容不应作为默认 `train/*` 主面板指标：
+
+- `train/reward_metrics/*` 全量展开
+- `train/final_reward`
+- `train/max_relative_drop`
+- `train/answer_tag_present`
+- `train/answer_extraction_failed`
+- `train/used_answer_fallback`
+- `train/reference_supported`
+- `train/used_mathruler`
+- `train/reference_type_id`
+- `train/perf/*`
+- trajectory analysis 产出的长尾统计
+
+### 9.5 Runtime Eval 的目标与边界
+
+当前阶段的 `eval/*` 只做 **runtime eval**，不做论文 benchmark eval。
+
+这里的 runtime eval 目标是：
+
+- 在训练过程中给出一个比 rollout 更稳定的趋势信号
+- 判断 reward / correctness / process-quality 是否同步向好
+- 不把训练 loop 变成 benchmark runner
+
+当前明确不做的事情：
+
+- 不在这一步里接入 MathVista / MathVerse / GeoQA 等论文 benchmark
+- 不把 eval 做成单独论文结论页
+- 不把 test-time scaling / verifier reranking 逻辑塞进训练期 eval
+
+### 9.6 Runtime Eval 数据来源
+
+runtime eval 必须使用 **独立 held-out 数据**，而不是继续依赖“当前训练 manifest 上可能存在、也可能不存在的 split 名”。
+
+推荐优先级：
+
+1. 单独的 `eval_data` manifest
+2. 若短期没有独立 manifest，再考虑从当前 manifest 中显式切出一个固定 held-out 子集
+
+不建议继续依赖的方式：
+
+- 仅靠 `eval_split=test` 去赌当前 JSONL / DatasetDict 里是否真的有 `test` split
+
+原因：
+
+- 当前 Stage 3 主线数据往往是单一 manifest 文件
+- 这种情况下，“设了 `eval_split`”并不天然等于“真正拿到了 held-out eval 集”
+- 如果 eval 数据和 train 数据语义上没有隔离，趋势会比真实泛化更乐观
+
+### 9.7 Runtime Eval 生成策略
+
+runtime eval 不应复用训练时的 rollout 采样设置。
+
+必须和训练 rollout 解耦的项：
+
+- `n_samples_per_prompt`
+- `do_sample`
+- `temperature`
+- `top_p`
+- `top_k`
+- `repetition_penalty`
+- `no_repeat_ngram_size`
+
+当前推荐默认值：
+
+- `eval_n_samples_per_prompt = 1`
+- `eval_do_sample = False`
+- `eval_temperature = 0.0` 或等价 greedy 配置
+- `eval_top_p = 1.0`
+- `eval_top_k = -1`
+- `eval_repetition_penalty = 1.0`
+- `eval_no_repeat_ngram_size = 0`
+
+约束说明：
+
+- runtime eval 的目标是“趋势稳定”，不是“模拟训练 rollout 分布”
+- 如果继续沿用训练态的 `n_samples_per_prompt = 8` 与 `do_sample=True`，eval 曲线会被采样噪声严重污染
+- eval 的 X 轴应继续沿用训练步数或 eval 次数，但生成策略必须是固定且低噪声的
+
+### 9.8 `eval/*` 保留集
+
+`eval/*` 先收敛到以下集合，**总量不超过 `8` 项**：
+
+1. `eval/reward`
+2. `eval/outcome_correct`
+3. `eval/has_drop_moment`
+4. `eval/model_reward`
+5. `eval/response_length`
+6. `eval/answer_extraction_failed`
+7. `eval/train_step`
+8. `eval/episode`
+
+说明：
+
+- `eval/reward`：当前 `math_psgrpo` 下的最终 reward 趋势
+- `eval/outcome_correct`：是否真的更容易答对
+- `eval/has_drop_moment`：过程质量是否在改善
+- `eval/model_reward`：PRM 聚合分数是否同步改善
+- `eval/response_length`：避免 reward/correctness 变化只是长度漂移
+- `eval/answer_extraction_failed`：最近格式稳定性虽然已有改善，但短期内这个指标仍值得保留
+- `eval/train_step` 与 `eval/episode`：作为上下文锚点保留
+
+默认不进入 `eval/*` 主看板的内容：
+
+- `step_score_min`
+- `step_score_mean`
+- `step_score_last`
+- `step_count`
+- `max_relative_drop`
+- `answer_tag_present`
+- `used_answer_fallback`
+- `reference_supported`
+- `used_mathruler`
+- `reference_type_id`
+- 全量 reward_metrics 展开
+
+#### 9.8.1 `eval/*` 字段语义与趋势解释
+
+runtime eval 的解释逻辑与 rollout 相似，但它的样本来源更稳定、生成策略更低噪声，因此更适合看中期趋势。
+
+##### `eval/reward`
+
+- 含义：
+  - held-out runtime eval 集上的最终 PS-GRPO reward 均值
+- 高/低意味着什么：
+  - 高：在固定 held-out 集上，整体质量更好
+  - 低：held-out 表现更差
+- 趋势怎么看：
+  - 稳定上升：最重要的正向信号之一
+  - 长期横盘：训练可能没有带来真实泛化改善
+  - 后期回落：要警惕过拟合或策略漂移
+
+##### `eval/outcome_correct`
+
+- 含义：
+  - held-out eval 集上的最终答案正确率 proxy
+- 高/低意味着什么：
+  - 高：真实答对更多
+  - 低：真实答对更少
+- 趋势怎么看：
+  - 持续上升：最好理解、也最值得信任
+  - 如果它不上升，单看 `eval/reward` 上升不能算完全成功
+
+##### `eval/has_drop_moment`
+
+- 含义：
+  - held-out eval 集上的 drop-moment 比例
+- 高/低意味着什么：
+  - 低更好
+  - 高更差
+- 趋势怎么看：
+  - 下降：过程稳定性改善
+  - 上升：过程质量退化
+
+##### `eval/model_reward`
+
+- 含义：
+  - held-out eval 集上的 PRM 聚合分数
+- 高/低意味着什么：
+  - 高：PRM 视角认为 reasoning 更可信
+  - 低：PRM 视角认为 reasoning 更不可信
+- 趋势怎么看：
+  - 应尽量和 `eval/outcome_correct` 同步改善
+  - 若二者长期脱钩，要警惕 verifier 口径与最终答案质量不一致
+
+##### `eval/response_length`
+
+- 含义：
+  - held-out eval 集上的回答长度均值
+- 高/低意味着什么：
+  - 本身没有单调好坏，只是上下文
+- 趋势怎么看：
+  - 应保持稳定或在合理区间轻微变化
+  - 持续上升但 `eval/outcome_correct` 不升：大概率是 verbosity drift
+  - 持续塌缩：大概率是格式、停词或输出截断问题
+
+##### `eval/answer_extraction_failed`
+
+- 含义：
+  - held-out eval 集上答案抽取失败比例
+- 高/低意味着什么：
+  - 低更好
+  - 高更差
+- 趋势怎么看：
+  - 应尽快下降并逼近 `0`
+  - 若突然升高，通常应优先排查输出格式，而不是先怀疑 PPO 本身
+
+##### `eval/train_step`
+
+- 含义：
+  - 本次 eval 对应的训练步
+- 高/低意味着什么：
+  - 只是上下文锚点
+
+##### `eval/episode`
+
+- 含义：
+  - 本次 eval 所处 episode
+- 高/低意味着什么：
+  - 只是上下文锚点
+
+### 9.8.2 Runtime Eval 健康趋势模板
+
+对当前 `math_psgrpo` 主线，runtime eval 最健康的组合趋势应接近：
+
+- `eval/reward` 上升
+- `eval/outcome_correct` 上升
+- `eval/has_drop_moment` 下降或至少不恶化
+- `eval/model_reward` 上升
+- `eval/answer_extraction_failed` 下降
+- `eval/response_length` 保持在合理区间，不出现失控上升或突然塌缩
+
+需要重点警惕的异常组合：
+
+- `eval/reward` 上升，但 `eval/outcome_correct` 不升
+  - 优先怀疑 reward 口径、答案抽取或 verifier 漂移
+- `eval/outcome_correct` 上升，但 `eval/has_drop_moment` 也显著上升
+  - 说明最终答案更常答对，但 reasoning 过程更脆
+- `eval/response_length` 大幅上升，但 `eval/reward` / `eval/outcome_correct` 不升
+  - 更像 verbosity drift，不像真实质量提升
+- `eval/answer_extraction_failed` 回升
+  - 优先排查输出格式、stop 条件和 answer marker
+
+### 9.9 README 交付要求
+
+当指标收口方案落代码后，必须同步更新：
+
+- `examples/math_prm/README.md`
+- `examples/math_prm/README_zh.md`
+
+并新增一个专门的小节，例如：
+
+- `W&B Metrics`
+- `Runtime Eval`
+
+README 中需要逐项解释最终保留下来的每个指标，至少说明：
+
+1. 指标所在 namespace
+2. 指标来自训练链路的哪个阶段
+3. 对 `math_psgrpo` 来说它的语义是什么
+4. 正常情况下应如何理解它的变化趋势
+5. 为什么它被保留在主看板，而不是降级为 debug-only 指标
+
+对 `math_psgrpo` 必须额外明确写清楚：
+
+- `reward` 在默认主线下就是最终 PS-GRPO reward
+- `reward` 与 `outcome_correct` 的区别
+- `has_drop_moment` 为什么是主看板指标
+- `model_reward` 与最终 reward 的关系
+
+### 9.10 实施顺序
+
+按风险和收益排序，建议这样推进：
+
+1. 先做 `rollout/*` 与 `train/*` allowlist 收口
+2. 再做 runtime eval 的独立生成参数与独立指标 allowlist
+3. 再接入 held-out eval 数据入口
+4. 最后更新 `README.md` / `README_zh.md`
+
+原因：
+
+- 先把主看板降噪，才能更清楚地判断 runtime eval 还缺什么
+- 如果主看板本身仍然被大量调试指标污染，eval 设计也很容易继续扩张失控
+
+### 9.11 验收标准
+
+此轮改动完成后，至少应满足：
+
+- W&B 主 run 中：
+  - `train/*` 主看板规模约为 `22`
+  - `rollout/*` 主看板规模为 `7`
+  - `eval/*` 主看板规模不超过 `8`
+- `math_psgrpo` 默认主线下：
+  - `rollout/reward` 与最终 PS-GRPO reward 语义一致
+  - 不再同时保留同义的 `rollout/final_reward`
+- runtime eval：
+  - 不再复用训练态 `n_samples_per_prompt`
+  - 不再复用训练态随机采样配置
+  - 可以稳定反映趋势，而不是高噪声采样分布
+- 文档：
+  - `README.md` 与 `README_zh.md` 对最终保留指标逐项解释
+  - 明确指出哪些诊断项被降为 debug-only 指标
