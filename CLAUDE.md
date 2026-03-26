@@ -211,6 +211,17 @@ make dpush    # 推送到 Docker Hub
 - **如果某个新的运行时参数通过 `self.strategy.config.xxx` 被消费，你必须更新 `StrategyConfig`。**  
   如果快速路径是从 `StrategyConfig.from_args(args)` 读取配置，那么仅添加 argparse flag 是不够的。
 
+## W&B 环境变量约定
+
+处理本仓库中的 W&B 相关任务时，优先遵循 `examples/math_prm/run_grpo_math_prm_ursa_8b.sh` 的约定，不要绕开它自定义另一套优先级：
+
+- **API key 获取优先级固定为**：`LIGHTRFT_WANDB_API_KEY` → `WANDB_API_KEY` → 系统现有的 wandb 登录态 / 默认配置。
+- 若 `LIGHTRFT_WANDB_API_KEY` 存在，优先使用它；这是推荐的 run-scoped key 入口，尽量不要要求用户改写系统级 wandb 登录状态。
+- 只有当前两个环境变量都不存在时，才回退到系统默认 wandb 配置（例如已有的 `wandb login` 状态）。
+- **project / org / run 等上下文也尽量从环境变量读取**，优先看 `WANDB_PROJECT`、`WANDB_ORG`、`WANDB_RUN_NAME`；只有环境变量缺失时，才回退到脚本默认值或用户提供的链接。
+- 当用户要求“查看 wandb 运行状况”或让 AI 直接到 wandb 上排查时，应先检查当前 shell 环境和 `.env` 中的上述变量，再决定访问哪个 entity/project/run。
+- 除非用户明确要求，不要在仓库指令文件中写死真实的 W&B 密钥；指令文件只描述读取顺序和约定，不保存凭据本身。
+
 ## 提交风格
 
 遵循该仓库近期历史中的主流约定，使用 Conventional-Commit 风格的主题行：
