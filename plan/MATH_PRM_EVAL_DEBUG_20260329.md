@@ -6,607 +6,768 @@
 
 ## 背景
 
-近期 `math_prm` / `math_psgrpo` 主链路中，W&B run `pjctfbbs` 的 eval 曲线表现出“几乎绝对不动”的现象。
+这次排查针对的是 `pjctfbbs` 这条 `math_psgrpo` 训练 run。
 
-对应讨论结论是，优先沿下面两条假设排查：
+现象非常明确：
 
-1. 模型其实没有真正训练起来。
-2. eval 逻辑或 eval 链路本身有 bug。
+- W&B 上 `eval acc` 基本是一条直线。
+- leader 的怀疑方向是两种：
+  1. 模型其实没训练起来。
+  2. eval 逻辑或者 eval 链路本身有 bug。
 
-本记录只做诊断归档，不修改代码。
+这份记录只做诊断归档，不改主线代码。
 
-## 本次排查范围
+## 当前结论
 
-- 线上 W&B run：
-  - `pjctfbbs`
-  - 同类历史 run：`51q21rc5`、`y9sulzln`、`unuz8bej`
-  - 对照 run：`da0cx5ok`、`vo45u2kd`
-- 本地日志：
-  - `rft_logs/lightrft-ursa8b-stage3-psgrpo/node0_20260325_114828.log`
-  - 以及同目录下历史 `psgrpo` 日志
-- 本地结果目录：
-  - `results/lightrft-ursa8b-stage3-psgrpo/...`
-- 当前代码链路：
-  - `examples/math_prm/run_grpo_math_prm_ursa_8b.sh`
-  - `examples/math_prm/train_colocate.py`
-  - `examples/math_prm/math_prm_trainer.py`
-  - `lightrft/trainer/ppo_trainer_vl.py`
-  - `lightrft/trainer/spmd_ppo_trainer.py`
-  - `lightrft/strategy/strategy_base.py`
-  - `lightrft/strategy/fsdp/fsdpv2.py`
+当前结论已经可以写得比较明确：
 
-## 结论先行
+1. **eval 不是没跑，确实在按步数触发。**
+2. **eval 不是“面板显示问题”，本地日志里的 eval 输出和聚合指标都几乎完全不变。**
+3. **训练权重不是没变。**
+   - checkpoint 在持续保存；
+   - step40 / step60 的 shard 内容不同；
+   - 离线从 step40 / step60 checkpoint 直接 decode，同一 held-out 样本的输出会变化。
+4. **最可能的问题点已经收敛到 separate local HF rollout actor 的权重同步链。**
+   - 直接改 inference engine，自然会让 rollout 输出变化；
+   - 直接改 actor，本体 direct generate 也会变化；
+   - 但改完 actor 再调用 `update_engine_weights(actor)`，rollout 输出不跟着变化。
 
-### 1. eval 不是没有触发
+所以当前最强判断不是“模型没训练”，而是：
 
-`pjctfbbs` 的本地日志里，runtime eval 明确在 `step 5/10/15/.../65` 都触发了。
+- **runtime eval 大概率没有真正吃到最新训练 actor 的权重。**
+- **问题更像出在 `update_engine_weights(actor)` 到 separate rollout actor 的同步语义上。**
 
-日志中能看到：
+---
 
-- `Aggregated runtime eval metrics (Step 5)`
-- `Aggregated runtime eval metrics (Step 10)`
-- ...
-- `Aggregated runtime eval metrics (Step 65)`
+## 逻辑链条总览
 
-对应位置示例：
+这次诊断的完整逻辑链条是：
 
-- `rft_logs/lightrft-ursa8b-stage3-psgrpo/node0_20260325_114828.log:8648`
-- `rft_logs/lightrft-ursa8b-stage3-psgrpo/node0_20260325_114828.log:21068`
-- `rft_logs/lightrft-ursa8b-stage3-psgrpo/node0_20260325_114828.log:22172`
+1. 先确认 eval 到底有没有触发。
+2. 再确认 eval 结果是不是“真的完全不动”。
+3. 然后排除 eval 数据集本身为空、切坏、或高度退化的可能。
+4. 再排除“本地 HF rollout 路径根本不能工作”的可能。
+5. 然后确认训练权重是否真的落盘、是否真的变化。
+6. 最后做最小化同步探针，验证：
+   - 改 inference engine 会不会影响 rollout；
+   - 改 actor 本体会不会影响 direct generate；
+   - 改 actor 再 sync 到 rollout，会不会影响 rollout。
 
-### 2. 但 eval 聚合结果确实完全不变
+走完这条链之后，问题边界已经非常清楚。
 
-`pjctfbbs` 本地日志里，聚合后的 eval 指标从 `step 5` 到 `step 65` 数值完全一样：
+---
 
-| step | reward | outcome_correct | has_drop_moment | model_reward | response_length | answer_extraction_failed |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 5 | 0.3601 | 0.3909 | 0.4365 | 0.4994 | 185.2699 | 0.0714 |
-| 20 | 0.3601 | 0.3909 | 0.4365 | 0.4994 | 185.2699 | 0.0714 |
-| 40 | 0.3601 | 0.3909 | 0.4365 | 0.4994 | 185.2699 | 0.0714 |
-| 60 | 0.3601 | 0.3909 | 0.4365 | 0.4994 | 185.2699 | 0.0714 |
-| 65 | 0.3601 | 0.3909 | 0.4365 | 0.4994 | 185.2699 | 0.0714 |
+## 一、eval 确实在跑，而且本地日志里的值就是死的
 
-这说明“eval 是直线”不是纯 W&B 面板展示问题，本地日志中的聚合 eval 输出本身就是直线。
+### 1.1 eval 聚合指标在 step 5 和 step 60 完全相同
 
-### 3. 训练侧并不是完全没动作
+下面是本地日志里 `step 5` 的聚合 eval 输出：
 
-至少从训练链路和落盘结果看，不能把问题简单归因为“根本没训练”：
+```text
+[StrategyINFO 03-25 13:51:16]  Aggregated runtime eval metrics (Step 5):
+[StrategyINFO 03-25 13:51:16]    reward: 0.3601
+[StrategyINFO 03-25 13:51:16]    outcome_correct: 0.3909
+[StrategyINFO 03-25 13:51:16]    has_drop_moment: 0.4365
+[StrategyINFO 03-25 13:51:16]    model_reward: 0.4994
+[StrategyINFO 03-25 13:51:16]    response_length: 185.2699
+[StrategyINFO 03-25 13:51:16]    answer_extraction_failed: 0.0714
+```
 
-- rollout 侧指标在 run 过程中明显波动，不是整条 run 都是常数。
-- `pjctfbbs` 在 `global_step20`、`global_step40`、`global_step60` 都保存了 actor checkpoint。
-- 每个 step 后都调用了 `update_engine_weights()`，而且日志里反复打印了
-  `Finished update engine weights for separate local HF rollout actor ... copy_state_s=...`
-- `global_step40` 和 `global_step60` 的 checkpoint shard 文件哈希不同，说明磁盘上的 actor checkpoint 字节内容确实发生了变化。
+下面是本地日志里 `step 60` 的聚合 eval 输出：
 
-### 4. 当前最合理的缩圈判断
+```text
+[StrategyINFO 03-26 11:12:16]  Aggregated runtime eval metrics (Step 60):
+[StrategyINFO 03-26 11:12:16]    reward: 0.3601
+[StrategyINFO 03-26 11:12:16]    outcome_correct: 0.3909
+[StrategyINFO 03-26 11:12:16]    has_drop_moment: 0.4365
+[StrategyINFO 03-26 11:12:16]    model_reward: 0.4994
+[StrategyINFO 03-26 11:12:16]    response_length: 185.2699
+[StrategyINFO 03-26 11:12:16]    answer_extraction_failed: 0.0714
+```
 
-当前问题已经缩到下面两类之一：
+这条证据说明：
 
-1. **训练 actor 确实在变化，但 eval 用到的模型/权重是 stale 的。**
-2. **训练 actor 有变化，但变化不足以改变当前固定 held-out + greedy eval 的输出，导致 eval 聚合指标完全不变。**
+- eval 曲线“完全不动”不是 W&B 面板抽风。
+- 本地 runtime eval 的聚合结果本身就是常数。
 
-第一类更像“链路问题”，第二类更像“训练有效但对 greedy held-out 没有行为变化”。
+### 1.2 eval 打印出来的首个样本文本也完全不变
 
-目前还没有做完最后一步验证，不能只凭现有证据在这两者之间下最终结论。
+为了避免“聚合指标不变，但单样本文本其实在波动”的误判，我继续看了 eval 阶段打印的第一个样本输出。
 
-## `pjctfbbs` 的关键信息
+`step 5` 的原始日志片段：
 
-### W&B / 本地路径映射
+```text
+[StrategyINFO 03-25 13:42:11]  eval phase: experience.sequences w skip_special_tokens:  ['system
+A conversation between the User and Assistant. The User asks a question that may require mathematical or visual reasoning, and the Assistant solves it step by step. Each step MUST begin with "Step N:" (e.g. "Step 1:", "Step 2:") on its own line. After all steps, output exactly one final answer line prefixed with "†Answer:" (e.g. "†Answer: 42"). Stop immediately after the "†Answer:" line and do not output any extra text, repeated answer markers, or additional steps.
+user
+ As shown in the figure, two roads of the same width are built on a rectangular ground with a width of 20 meters and a length of 30 meters, leaving the remaining part as farmland. If the area of the farmland needs to be 551 square meters, the width of the roads should be
 
-- W&B URL：`https://wandb.ai/hansbug/LightRFT-URSA8B-Stage3/runs/pjctfbbs`
-- 本地 W&B 目录：`/data/LightRFT/wandb/run-20260325_115151-pjctfbbs`
-- 本地日志：`/data/LightRFT/rft_logs/lightrft-ursa8b-stage3-psgrpo/node0_20260325_114828.log`
-- 本地结果目录：`/data/LightRFT/results/lightrft-ursa8b-stage3-psgrpo/lightrft-ursa8b-stage3-psgrpo-ep10-kl0.001-lr1e-6-20260325_114828`
+[____ ]
+A. 1 meter
+B. 1.5 meters
+C. 2 meters
+D. 2.5 meters
+Options:
+assistant
+Step 1: Let the width of the road be x meters.
+Step 2: The total area of the rectangular ground is 20m * 30m = 600 square meters.
+Step 3: The total area of the roads is 20x + 30x - x^2.
+Step 4: The farmland area is 600 - (20x + 30x - x^2) = 551 square meters.
+Step 5: 600 - 50x + x^2 = 551.
+Step 6: x^2 - 50x + 49 = 0.
+Step 7: Using the quadratic formula, x = [50 ± sqrt(50^2 - 4*1*49)] / 2*1.
+Step 8: x = [50 ± sqrt(2500 - 196)] / 2.
+Step 9: x = [50 ± sqrt(2304)] / 2.
+Step 10: x = [50 ± 48] / 2.
+Step 11: x = 49 or x = 1.
+Step 12: Since the width of the road cannot be greater than the width of the rectangle, x = 1 meter.
+†Answer: 1']
+```
 
-### 启动参数中和 eval 直接相关的部分
+`step 20` 对应轮次的原始日志片段：
 
-从日志里的 `Namespace(...)` 可确认，本次 run 的关键参数为：
+```text
+[StrategyINFO 03-25 15:40:51]  eval phase: experience.sequences w skip_special_tokens:  ['system
+A conversation between the User and Assistant. The User asks a question that may require mathematical or visual reasoning, and the Assistant solves it step by step. Each step MUST begin with "Step N:" (e.g. "Step 1:", "Step 2:") on its own line. After all steps, output exactly one final answer line prefixed with "†Answer:" (e.g. "†Answer: 42"). Stop immediately after the "†Answer:" line and do not output any extra text, repeated answer markers, or additional steps.
+user
+ As shown in the figure, two roads of the same width are built on a rectangular ground with a width of 20 meters and a length of 30 meters, leaving the remaining part as farmland. If the area of the farmland needs to be 551 square meters, the width of the roads should be
 
-- `engine_type='hf'`
-- `fsdp=True`
-- `hf_separate_rollout_actor=True`
-- `hf_separate_rollout_keep_on_gpu=True`
-- `eval_steps=5`
-- `eval_data=None`
-- `eval_split=''`
-- `max_eval_samples=500`
-- `eval_holdout_size=500`
-- `eval_holdout_seed=42`
-- `eval_n_samples_per_prompt=1`
-- `eval_do_sample=False`
-- `eval_temperature=0.0`
-- `eval_generate_max_len=3072`
+[____ ]
+A. 1 meter
+B. 1.5 meters
+C. 2 meters
+D. 2.5 meters
+Options:
+assistant
+Step 1: Let the width of the road be x meters.
+Step 2: The total area of the rectangular ground is 20m * 30m = 600 square meters.
+Step 3: The total area of the roads is 20x + 30x - x^2.
+Step 4: The farmland area is 600 - (20x + 30x - x^2) = 551 square meters.
+Step 5: 600 - 50x + x^2 = 551.
+Step 6: x^2 - 50x + 49 = 0.
+Step 7: Using the quadratic formula, x = [50 ± sqrt(50^2 - 4*1*49)] / 2*1.
+Step 8: x = [50 ± sqrt(2500 - 196)] / 2.
+Step 9: x = [50 ± sqrt(2304)] / 2.
+Step 10: x = [50 ± 48] / 2.
+Step 11: x = 49 or x = 1.
+Step 12: Since the width of the road cannot be greater than the width of the rectangle, x = 1 meter.
+†Answer: 1']
+```
 
-这意味着该 run 不是走显式 `eval_data`，而是走：
+`step 60` 之后对应轮次的原始日志片段：
 
-- 从 `prompt_data` 中按固定 seed 切出的 deterministic held-out subset
-- `n_samples=1`
-- greedy eval
+```text
+[StrategyINFO 03-25 19:29:01]  eval phase: experience.sequences w skip_special_tokens:  ['system
+A conversation between the User and Assistant. The User asks a question that may require mathematical or visual reasoning, and the Assistant solves it step by step. Each step MUST begin with "Step N:" (e.g. "Step 1:", "Step 2:") on its own line. After all steps, output exactly one final answer line prefixed with "†Answer:" (e.g. "†Answer: 42"). Stop immediately after the "†Answer:" line and do not output any extra text, repeated answer markers, or additional steps.
+user
+ As shown in the figure, two roads of the same width are built on a rectangular ground with a width of 20 meters and a length of 30 meters, leaving the remaining part as farmland. If the area of the farmland needs to be 551 square meters, the width of the roads should be
 
-这与 launcher 默认逻辑一致：
+[____ ]
+A. 1 meter
+B. 1.5 meters
+C. 2 meters
+D. 2.5 meters
+Options:
+assistant
+Step 1: Let the width of the road be x meters.
+Step 2: The total area of the rectangular ground is 20m * 30m = 600 square meters.
+Step 3: The total area of the roads is 20x + 30x - x^2.
+Step 4: The farmland area is 600 - (20x + 30x - x^2) = 551 square meters.
+Step 5: 600 - 50x + x^2 = 551.
+Step 6: x^2 - 50x + 49 = 0.
+Step 7: Using the quadratic formula, x = [50 ± sqrt(50^2 - 4*1*49)] / 2*1.
+Step 8: x = [50 ± sqrt(2500 - 196)] / 2.
+Step 9: x = [50 ± sqrt(2304)] / 2.
+Step 10: x = [50 ± 48] / 2.
+Step 11: x = 49 or x = 1.
+Step 12: Since the width of the road cannot be greater than the width of the rectangle, x = 1 meter.
+†Answer: 1']
+```
 
-- `examples/math_prm/run_grpo_math_prm_ursa_8b.sh`
-- `examples/math_prm/train_colocate.py` 中的 `split_runtime_eval_dataset(...)`
+这条证据比“W&B 曲线平”更强：
 
-## 当前 eval 实现链路
+- **固定 held-out 样本的原始生成文本本身就是死的。**
 
-### 1. 数据集来源
+---
 
-`train_colocate.py` 中：
+## 二、eval 数据集本身没有坏掉
 
-- 如果没传 `eval_data` 且没传 `eval_split`，则从 `prompt_data` 切出固定 held-out eval。
-- 具体实现是 `split_runtime_eval_dataset(...)`。
+### 2.1 held-out split 是稳定存在的
 
-这条链路的语义是：
+我按训练配置的相同规则单独切了一遍 held-out：
 
-- eval 数据应当是固定的
-- 每次 eval 用的是同一批 held-out 样本
+- `test_size = 500`
+- `seed = 42`
 
-### 2. eval 运行时上下文
+输出如下：
 
-`examples/math_prm/math_prm_trainer.py` 中：
+```text
+train_len= 1018559
+eval_len= 500
+{'i': 0, 'label': 'math_psgrpo', 'reference': '1', 'image': '/home/ubuntu/URSA-MATH/datasets/URSA-MATH/images/RGB_images/dd1c884f28781cf3c4dbcf192fbd3604.png', 'prompt_prefix': 'As shown in the figure, two roads of the same width are built on a rectangular ground with a width o'}
+{'i': 1, 'label': 'math_psgrpo', 'reference': '11.0', 'image': '/home/ubuntu/URSA-MATH/datasets/URSA-MATH/images/DataEngine_Geometry/rule_base_geo_vision_dom/depth3/24629_vision_dom.jpg', 'prompt_prefix': 'AB equals to 11.0. What is the length of the side GH that forms the base of the isosceles triangle G'}
+{'i': 2, 'label': 'math_psgrpo', 'reference': 'lobby adjacent to exhibit area', 'image': '/home/ubuntu/URSA-MATH/datasets/URSA-MATH/images/data_images/DocVQA/images/txpp0227_13.png', 'prompt_prefix': 'At which location will the coffee be served?'}
+{'i': 3, 'label': 'math_psgrpo', 'reference': 'B', 'image': '/home/ubuntu/URSA-MATH/datasets/URSA-MATH/images/data_images/PMC-VQA/images/PMC8126771_fig01_443233.jpg', 'prompt_prefix': 'What is the significance of the cyan arrow shown in the image?\nChoices:\n(A)  Distance between the me'}
+{'i': 4, 'label': 'math_psgrpo', 'reference': '27', 'image': '/home/ubuntu/URSA-MATH/datasets/URSA-MATH/images/RGB_images/2912ade8b6644db804037aaafffde6b3.png', 'prompt_prefix': 'There are ____ parallelograms in the image.'}
+```
 
-- `_build_eval_generate_kwargs()` 会构建单独的 eval 生成参数
-- `_runtime_eval_context()` 会在 eval 期间临时覆盖
-  - `generate_kwargs`
-  - `n_samples_per_prompt`
-  - `advantage_estimator`
+这条证据说明：
 
-关键点：
+- held-out eval 数据集不是空的；
+- 不是全重复样本；
+- 也不是 label / reference 全都坏掉了。
 
-- eval 时强制 `n_samples_per_prompt = eval_n_samples_per_prompt`
-- eval 时把 `advantage_estimator` 临时改成 `reinforce`
-- eval 结束后再恢复训练态配置
+### 2.2 eval 的首样本正好就是 held-out[0]
 
-### 3. eval 实际执行逻辑
+从上面的 split 输出看，第 0 个 held-out 样本就是：
 
-`lightrft/trainer/ppo_trainer_vl.py` 的 `evaluate()` 会：
+- “two roads / farmland 551” 这题；
+- reference 是 `1`；
+- label 是 `math_psgrpo`。
 
-1. 遍历 `eval_dataloader`
-2. 调用 `self.experience_maker.make_experience_list(...)`
-3. 从 `experience.info` 中收集 reward / reward_metrics / response_length
-4. 计算 `*_mean`
+而训练日志里反复打印的 eval 首样本，正好就是这道题。
 
-也就是说，eval 并不是直接跑一个独立“推理-only”路径，而是复用了 `experience_maker` 的生成和奖励计算逻辑。
+这说明：
 
-### 4. eval 的 W&B 记录语义
+- 我后面做的离线对比和训练日志里的 runtime eval，确实是在看同一条 held-out 样本。
 
-`examples/math_prm/math_prm_trainer.py` 里：
+---
 
-- `eval/*` 被定义到 `eval/train_step` 这条 X 轴
-- `save_logs_and_checkpoints()` 中每到 `global_step % eval_steps == 0` 就执行 eval 并记录
+## 三、本地 HF rollout 路径本身不是“根本不能工作”
 
-因此这次 `pjctfbbs` 的问题，不是“没有 eval logging key”，而是“eval key 有了，但值恒定”。
+为了排除 “local HF rollout path 根本坏了” 这种更基础的问题，我先做了一个独立 smoke check。
 
-## 2026-03-29 新增最小化 probe 结果
+输出如下：
 
-本节补充本轮新增的最小化局部验证，目标是把问题从“训练没动”与“eval 链路 stale”之间进一步定性。
+```json
+{
+  "success": false,
+  "strict_structure_success": false,
+  "engine_type": "hf",
+  "rollout_checks": {
+    "engine_type_is_hf": true,
+    "engine_reuses_actor": true,
+    "num_outputs_match": true,
+    "all_non_empty": true,
+    "all_match_direct_generate": true,
+    "all_below_length_cap": false
+  },
+  "quality_checks": {
+    "all_have_step_marker": true,
+    "all_have_answer_marker": false,
+    "all_stop_condition_satisfied": false
+  },
+  "samples": [
+    {
+      "name": "vqa_flatness",
+      "tokens_match_direct_generate": true,
+      "generated_text": "Step 1: Observe the image provided.\nStep 2: Analyze the landscape in the image.\nStep 3: Determine if the landscape is flat or not.\nStep 4: Conclude that the landscape is not flat.\n\n†Answer: no"
+    },
+    {
+      "name": "table_linear_eq",
+      "tokens_match_direct_generate": true,
+      "generated_text": "Step 1: Identify the problem: Find the y-value when x = 6 6 and the equation is y = 3x + 5.\n\nStep 2: Substitute the given value of x into the equation::  Substitute x = 7 into the equation y = 2x +"
+    }
+  ]
+}
+```
 
-### 1. 真实 checkpoint 的离线输出会变化
+这里的重点不是 `success=false`，而是：
 
-我先把 `pjctfbbs` 的两个 actor FSDP checkpoint 转成 HF 目录：
+- `engine_type_is_hf: true`
+- `engine_reuses_actor: true`
+- `all_match_direct_generate: true`
 
-- `tmp/ursa_stage3/pjctfbbs_step40_hf`
-- `tmp/ursa_stage3/pjctfbbs_step60_hf`
+这说明：
 
-然后按训练时相同的 held-out 规则：
+- local HF engine 的 `gather_and_generate()` 与 direct `actor.generate()` 至少在最小化场景下是对齐的；
+- rollout 路径不是完全没接上。
 
-- `eval_holdout_size=500`
-- `eval_holdout_seed=42`
+所以问题不能简单归因为：
 
-从 `mmathcot_stage3_math_psgrpo.jsonl` 中取前 8 个 held-out eval 样本，分别用：
+- “local HF rollout 根本不能生成”
+
+---
+
+## 四、训练权重不是没动，checkpoint 也不是没保存
+
+### 4.1 checkpoint 在正常保存
+
+日志原文如下：
+
+```text
+[StrategyINFO 03-25 19:37:50]  DCP checkpoint saved to results/lightrft-ursa8b-stage3-psgrpo/.../_actor/global_step20
+[StrategyINFO 03-25 19:37:50]  client_state save to results/lightrft-ursa8b-stage3-psgrpo/.../_actor/global_step20/client_state.pt, content: {'consumed_samples': 2560}
+
+[StrategyINFO 03-26 03:23:42]  DCP checkpoint saved to results/lightrft-ursa8b-stage3-psgrpo/.../_actor/global_step40
+[StrategyINFO 03-26 03:23:42]  client_state save to results/lightrft-ursa8b-stage3-psgrpo/.../_actor/global_step40/client_state.pt, content: {'consumed_samples': 5120}
+
+[StrategyINFO 03-26 11:12:24]  Deleted oldest ckpt results/lightrft-ursa8b-stage3-psgrpo/.../_actor/global_step20
+[StrategyINFO 03-26 11:12:39]  DCP checkpoint saved to results/lightrft-ursa8b-stage3-psgrpo/.../_actor/global_step60
+[StrategyINFO 03-26 11:12:39]  client_state save to results/lightrft-ursa8b-stage3-psgrpo/.../_actor/global_step60/client_state.pt, content: {'consumed_samples': 7680}
+```
+
+这说明：
+
+- step20 / step40 / step60 的 actor ckpt 都正常保存了；
+- step60 保存时还删除了最旧的 step20，符合 `max_ckpt_num=2` 的配置预期。
+
+### 4.2 checkpoint shard 的字节内容确实不同
+
+我直接算了 `global_step40` 和 `global_step60` 的几个 shard 的 SHA256：
+
+```text
+314e6d93abf35ee0712fb1b9ca928f0dea9764e3e1da2ffa0f927b315874051b  __0_0.distcp (step40)
+72d63d9f7db6b164dfe3b82a066e389cf494179214cafdbba61dc5c08ea490d4  __0_0.distcp (step60)
+
+10d4e34ef4a2d0c86e214bfc208f310e04ba6f27d149d8f152bce73236a9f6f8  __1_0.distcp (step40)
+55a67f62830f47345f1bd234d378c06287f575728bb7defa51137882aba439d4  __1_0.distcp (step60)
+
+48e6021ea2f0941d56100f7d912c05418dd9c88d406ca4579f90f08216c13624  __2_0.distcp (step40)
+8af6e408a998bdea35f05a800c51ac2dcc994ccd03cfc6bd4f4bf8241e4ce0b6  __2_0.distcp (step60)
+```
+
+这条证据说明：
+
+- `global_step40` 和 `global_step60` 不是同一份旧权重重复写盘；
+- 磁盘上的 actor 权重内容真的变了。
+
+### 4.3 训练过程中也确实在调用权重同步
+
+训练刚开始时就能看到：
+
+```text
+[StrategyINFO 03-25 11:51:50]  Finished update engine weights for separate local HF rollout actor {'total_s': 0.4636, 'keep_on_gpu': True, 'actor_offloaded': False, 'rollout_offloaded': False, 'offload_actor_s': 0.0, 'offload_rollout_s': 0.0, 'copy_state_s': 0.4534, 'prepare_s': 0.008, 'sync_clear_s': 0.0023}
+```
+
+后面在最小化 probe 中，这个同步操作也会持续出现，`copy_state_s` 大约在 `34-35s`。
+
+所以从“流程有没有跑到”这个角度看：
+
+- `update_engine_weights(actor)` 是有执行的；
+- 但“执行了”并不等于“同步语义真的正确”。
+
+---
+
+## 五、离线从真实 checkpoint 直接 decode，同一 held-out 样本会变化
+
+这是把问题从“训练没动”里真正拉开的关键证据。
+
+我把 `global_step40` 和 `global_step60` 都转成了 HF 目录，然后按训练时相同的 held-out 规则：
+
+- `eval_holdout_size = 500`
+- `eval_holdout_seed = 42`
+
+取前 8 个 held-out 样本，分别用：
 
 - base model
-- `global_step40`
-- `global_step60`
+- step40
+- step60
 
-做 greedy decode，对比结果见：
+做 greedy decode。
 
-- `tmp/ursa_stage3/compare_eval_checkpoint_decodes_limit8.json`
+输出摘要如下：
 
-核心结果：
+```json
+{
+  "eval_holdout_size": 500,
+  "eval_holdout_seed": 42,
+  "limit": 8,
+  "changed_counts": {
+    "base_vs_step40": 6,
+    "base_vs_step60": 6,
+    "step40_vs_step60": 6
+  }
+}
+```
 
-- `base_vs_step40`: `6/8` 个样本输出发生变化
-- `base_vs_step60`: `6/8` 个样本输出发生变化
-- `step40_vs_step60`: `6/8` 个样本输出发生变化
+也就是说：
 
-对应文件中：
+- 8 个 held-out 样本里，有 6 个在 `base -> step40` 时文本变了；
+- 有 6 个在 `base -> step60` 时文本变了；
+- 有 6 个在 `step40 -> step60` 时文本变了。
 
-- `tmp/ursa_stage3/compare_eval_checkpoint_decodes_limit8.json:12`
-- `tmp/ursa_stage3/compare_eval_checkpoint_decodes_limit8.json:15`
+第 0 个 held-out 样本正好就是 runtime eval 一直打印的 “two roads / farmland 551” 这题，它的离线结果如下：
 
-其中第 0 个 held-out 样本就是日志里反复打印的那道“two roads / farmland 551”题。离线 decode 对比显示：
+```json
+{
+  "index": 0,
+  "prompt_hash": "7bafd9fde35aa9b4",
+  "reference": "1",
+  "label": "math_psgrpo",
+  "base_hash": "8e3c00da39819320",
+  "step40_hash": "17d5d5a13c2e3557",
+  "step60_hash": "8e3c00da39819320",
+  "base_vs_step40_changed": true,
+  "base_vs_step60_changed": false,
+  "step40_vs_step60_changed": true,
+  "base_preview": "Step 1: Let the width of the road be x meters.\nStep 2: The total\n†Answer: No answer found<|im_end|>",
+  "step40_preview": "Step 1: Let the width of of the road be x meters.\nStep 2: The total\n†Answer: No answer found<|im_end|>",
+  "step60_preview": "Step 1: Let the width of the road be x meters.\nStep 2: The total\n†Answer: No answer found<|im_end|>"
+}
+```
+
+这条证据的意义非常直接：
+
+- **真实训练 checkpoint 已经足够改变 held-out 样本的 greedy decode。**
+
+因此，“训练更新太小，小到完全不影响行为”这条解释已经明显变弱了。
 
-- base / step60：
-  - `Step 1: Let the width of the road be x meters.`
-- step40：
-  - `Step 1: Let the width of of the road be x meters.`
+更准确的说法应该是：
+
+- 如果 runtime eval 真在吃最新 actor，那至少一部分固定 held-out 样本的输出本该抖动。
 
-对应文件位置：
+---
 
-- `tmp/ursa_stage3/compare_eval_checkpoint_decodes_limit8.json:19`
-- `tmp/ursa_stage3/compare_eval_checkpoint_decodes_limit8.json:32`
+## 六、最关键的最小化同步 probe
 
-这条证据非常关键：
+这部分是目前最能说明问题的位置。
 
-- **真实训练 checkpoint 会改变 held-out eval 样本的解码文本。**
-- 因而“模型完全没训练起来，所以 eval 才是一条死线”这一解释已经明显站不住。
+### 6.1 直接改 inference engine，自然会让 rollout 输出变化
 
-### 2. 运行时 eval 日志里的相同 held-out 样本却始终不变
+我对 separate rollout actor 的 `inference_engine` 直接做了极端扰动：
 
-训练日志里，多次打印了 eval 阶段的首个样本文本。对于上面同一道“two roads / farmland 551”题，`step 5 / 20 / 65` 的日志内容完全一致：
+- 把 `lm_head` 清零
 
-- `rft_logs/lightrft-ursa8b-stage3-psgrpo/node0_20260325_114828.log:8551`
-- `rft_logs/lightrft-ursa8b-stage3-psgrpo/node0_20260325_114828.log:9664`
-- `rft_logs/lightrft-ursa8b-stage3-psgrpo/node0_20260325_114828.log:22079`
+输出如下：
 
-这说明：
+```json
+{
+  "sample_name": "vqa_flatness",
+  "before_len": 64,
+  "after_len": 64,
+  "tokens_changed": true,
+  "mutate_target": "inference_engine",
+  "mutate_mode": "lm_head_zero",
+  "before_text": "Step 1: Observe the image. The image shows a landscape with a plane flying in the sky and another plane on the ground.\n\nStep 2: Analyze the landscape. The ground appears to be mostly flat, with some variations in elevation.\n\nStep 3: Determine if the landscape is flat. Based<|im_end|>",
+  "after_text": "!!!!\"!!!#!!!$!!!%!!!&!!!'!!!(!!!)!!!*!!!+!!!,!!!-!!!.!!!/!!!0!!<|im_end|>",
+  "sync_stats": {
+    "total_s": 34.3065,
+    "copy_state_s": 34.2964
+  }
+}
+```
 
-- **训练过程中 runtime eval 实际打印出来的生成文本没有变。**
-- 但离线从 `global_step40/60` checkpoint 直接解码，同一 held-out prompt 的输出已经变了。
+这个结果说明：
 
-两条证据合起来，已经足以说明问题不在“checkpoint 本身是否变化”，而在“runtime eval 当时吃到的到底是不是当前 actor 权重”。
+- rollout 使用的推理对象本身是活的；
+- 它当前参数一旦被直接改坏，生成会立刻变坏。
 
-### 3. 直接修改 inference engine，会立刻改变 rollout 输出
+### 6.2 直接改 FSDP actor，本体 direct generate 也会变化
 
-对单卡最小化 FSDP + separate rollout probe 做了一个强制扰动：
+我又做了另一个探针：
 
-- 直接把 `strategy.inference_engine` 持有的 `lm_head` 清零
+- 把 FSDP actor 当前持有的参数全部清零；
+- 不经过 rollout engine，直接调用 actor 自己的 `generate`。
 
-结果见：
+输出如下：
 
-- `tmp/ursa_stage3/probe_separate_rollout_generation_change_inference_zero.log`
+```json
+{
+  "tokens_changed": true,
+  "before_text": "Step 1: Observe the image. The image shows a landscape with a plane flying in the sky and another plane on the ground.\n\nStep 2: Analyze the landscape. The ground appears to be flat, with no significant hills or mountains visible.\n\nStep 3: Conclude. Based on the visual<|im_end|>",
+  "after_text": "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!<|im_end|>"
+}
+```
 
-关键结果：
+这个结果说明：
 
-- `tokens_changed: true`
-- 生成文本从正常回答变成了明显损坏的 `!!!!...`
+- 我对 actor 的极端扰动是有效的；
+- FSDP actor 当前前向真正用到的那份参数，确实已经被改坏了；
+- 因此“actor 其实没被改到”的解释站不住。
 
-对应位置：
+### 6.3 但改完 actor 再走 `update_engine_weights(actor)`，rollout 输出却不变
 
-- `tmp/ursa_stage3/probe_separate_rollout_generation_change_inference_zero.log:1799`
-- `tmp/ursa_stage3/probe_separate_rollout_generation_change_inference_zero.log:1809`
+接下来是最关键的 probe：
 
-这证明：
+1. 把 FSDP actor 全部清零；
+2. 调用 `update_engine_weights(actor)`；
+3. 再通过 separate rollout actor 跑 `gather_and_generate`。
 
-- **rollout / eval 使用的 inference engine 对象本身是活的。**
-- **它当前的参数如果被直接改坏，生成输出会立刻跟着变。**
+输出如下：
 
-### 4. 直接修改 FSDP actor，本体直接生成也会立刻变化
+```json
+{
+  "sample_name": "vqa_flatness",
+  "before_len": 64,
+  "after_len": 64,
+  "tokens_changed": false,
+  "mutate_target": "actor",
+  "mutate_mode": "all_zero",
+  "before_text": "Step 1: Observe the image. The image shows a landscape with a plane flying in the sky and another plane on the ground.\n\nStep 2: Analyze the landscape. The ground appears to be mostly flat, with some variations in elevation.\n\nStep 3: Determine if the landscape is flat. Based<|im_end|>",
+  "after_text": "Step 1: Observe the image. The image shows a landscape with a plane flying in the sky and another plane on the ground.\n\nStep 2: Analyze the landscape. The ground appears to be mostly flat, with some variations in elevation.\n\nStep 3: Determine if the landscape is flat. Based<|im_end|>",
+  "sync_stats": {
+    "total_s": 35.2631,
+    "copy_state_s": 35.2526
+  }
+}
+```
 
-我又验证了另一件事：
+这条证据的逻辑含义非常强：
 
-- 对 FSDP actor 本身的 `DTensor` 参数做 `all_zero`
-- 不走 rollout engine，直接调用 actor 自己的 `generate`
+1. actor 自己已经被改坏；
+2. inference engine 自己如果被改坏，rollout 会立刻变；
+3. 但 actor 改坏后，通过 `update_engine_weights(actor)` 同步到 rollout actor，rollout 却完全不变。
 
-结果见：
+也就是说：
 
-- `tmp/ursa_stage3/probe_actor_direct_generation_after_zero.log`
+- **问题不是 rollout engine 根本不能生成；**
+- **问题也不是 actor 根本没变；**
+- **问题出在 actor -> rollout actor 这条同步链。**
 
-关键结果：
+---
 
-- `tokens_changed: true`
-- 输出从正常文本变成 `!!!!!!!!!!!!!!!!...`
+## 七、为什么这更像同步语义问题，而不是“训练更新太小”
 
-对应位置：
+如果只看线上曲线，确实有两种解释：
 
-- `tmp/ursa_stage3/probe_actor_direct_generation_after_zero.log:1009`
-- `tmp/ursa_stage3/probe_actor_direct_generation_after_zero.log:1012`
+1. 训练没动；
+2. 训练动了，但 eval 没吃到。
 
-这证明：
+但加上上面的离线 checkpoint 对比和最小化 probe 后，这两种解释的权重已经不一样了。
 
-- **我对 actor 做的“清零”扰动本身是有效的。**
-- **FSDP actor 当前持有的参数确实会影响它自己的直接生成。**
+### 7.1 “训练没动”为什么越来越站不住
 
-### 5. 但通过 `update_engine_weights(actor)` 同步过去，rollout 输出却不变
+因为下面三条同时成立：
 
-随后做了最关键的最小化同步 probe：
+1. checkpoint 在按 step20 / 40 / 60 保存；
+2. shard 的 SHA256 明确不同；
+3. 从 step40 / step60 checkpoint 离线 decode，同一 held-out 样本的输出会变化。
 
-- 对 FSDP actor 做 `all_zero`
-- 调用 `strategy.update_engine_weights(actor)`
-- 再用 separate rollout actor 走 `gather_and_generate`
+这三条已经足以说明：
 
-结果见：
+- actor 训练权重不是完全冻结的；
+- 至少对一部分 held-out 样本，行为层面已经有变化。
 
-- `tmp/ursa_stage3/probe_separate_rollout_generation_change_actor_all_zero.log`
+### 7.2 “eval 没吃到最新权重”为什么越来越像
 
-关键结果：
+因为下面三条也同时成立：
 
-- `tokens_changed: false`
-- `copy_state_s` 仍然耗时约 `35s`
-- 前后 rollout 文本完全相同
+1. runtime eval 打印的首个 held-out 样本文本跨多个 eval 步完全一样；
+2. 直接改 rollout inference engine 会立刻改输出；
+3. 直接改 actor 再调用 `update_engine_weights(actor)`，却不会改 rollout 输出。
 
-对应位置：
+这套证据组合起来，最合理的解释就是：
 
-- `tmp/ursa_stage3/probe_separate_rollout_generation_change_actor_all_zero.log:1795`
-- `tmp/ursa_stage3/probe_separate_rollout_generation_change_actor_all_zero.log:1804`
-- `tmp/ursa_stage3/probe_separate_rollout_generation_change_actor_all_zero.log:1818`
+- `update_engine_weights(actor)` 这条链虽然执行了，但没有把当前 actor 的真实有效权重同步到 separate rollout actor。
 
-这条证据与前两条放在一起就非常明确：
+---
 
-1. actor 自己变了会影响直接生成；
-2. inference engine 自己变了会影响 rollout 生成；
-3. **但 actor 变了以后，通过 `update_engine_weights(actor)` 同步到 rollout actor，并没有让 rollout 生成发生对应变化。**
+## 八、当前最可疑的代码位置
 
-这已经是一个最小化可复现的链路问题，不再是“怀疑”。
+从代码层面看，最可疑的是 separate local HF rollout actor 的同步实现。
 
-## 当前最可能的根因位置
+核心逻辑如下：
 
-当前最可疑的代码位置已经缩到：
+```python
+def _copy_local_hf_rollout_actor_state(self, src_actor: nn.Module, dst_actor: nn.Module) -> None:
+    if self._separate_hf_rollout_sync_param_pairs is None or self._separate_hf_rollout_sync_buffer_pairs is None:
+        (
+            self._separate_hf_rollout_sync_param_pairs,
+            self._separate_hf_rollout_sync_buffer_pairs,
+        ) = self._build_local_hf_rollout_actor_sync_plan(src_actor, dst_actor)
 
-- `lightrft/strategy/strategy_base.py:850`
-- `lightrft/strategy/strategy_base.py:877`
+    for name, src_param, dst_param in self._separate_hf_rollout_sync_param_pairs:
+        src_tensor = src_param.detach()
+        if src_tensor.device != dst_param.device or src_tensor.dtype != dst_param.dtype:
+            src_tensor = src_tensor.to(device=dst_param.device, dtype=dst_param.dtype)
+        dst_param.detach().copy_(src_tensor)
 
-也就是：
+    for name, src_buffer_ref, dst_buffer in self._separate_hf_rollout_sync_buffer_pairs:
+        src_buffer = src_buffer_ref.detach()
+        if src_buffer.device != dst_buffer.device or src_buffer.dtype != dst_buffer.dtype:
+            src_buffer = src_buffer.to(device=dst_buffer.device, dtype=dst_buffer.dtype)
+        dst_buffer.detach().copy_(src_buffer)
+```
 
-- `_copy_local_hf_rollout_actor_state(...)`
-- `_sync_separate_hf_rollout_actor(...)`
+以及：
 
-尤其是 `_copy_local_hf_rollout_actor_state(...)` 的复制逻辑：
+```python
+def _sync_separate_hf_rollout_actor(self, actor: nn.Module) -> None:
+    ...
+    copy_state_t0 = time.time()
+    self._copy_local_hf_rollout_actor_state(actor, self.inference_engine)
+    copy_state_s = time.time() - copy_state_t0
+    ...
+    if keep_on_gpu:
+        torch.cuda.synchronize()
+        torch.distributed.barrier()
+        self.inference_engine_status = EngineStatus.WAKEUP
+```
 
-- `src_param.detach()`
-- `dst_param.detach().copy_(src_tensor)`
+入口则是：
 
-对应代码：
+```python
+def update_engine_weights(self, actor):
+    ...
+    if self.inference_engine_type == "hf":
+        if self._uses_separate_hf_rollout_actor():
+            self._sync_separate_hf_rollout_actor(actor)
+```
 
-- `lightrft/strategy/strategy_base.py:857`
-- `lightrft/strategy/strategy_base.py:861`
+当前最可疑的问题点是：
 
-结合上面的最小化复现，当前最合理的解释是：
+- `src_param` / `dst_param` 在 FSDP `DTensor` 场景下，`detach().copy_()` 的语义可能并没有把真正参与 forward 的那份有效参数内容同步过去；
+- 或者 source / destination 虽然名字一一对应，但当前复制到的对象并不是 rollout generate 实际使用的 live storage；
+- 又或者 `DTensor` 在这里需要的是显式 local shard / full state materialization，而不是当前这种直接 `copy_`。
 
-- 在 FSDP / `DTensor` 参数场景下，这里的参数复制**没有把 actor 的当前有效权重正确同步到 separate rollout actor**。
-- 因此日志里的
-  - `Finished update engine weights for separate local HF rollout actor`
-  - `copy_state_s=...`
-  只能证明“执行了复制流程”，**不能证明复制语义真的成功了**。
+注意，这里最关键的一点不是“代码看起来对不对”，而是：
 
-## 现在的诊断结论
+- **最小化 probe 已经说明这段同步的行为效果不对。**
 
-基于本轮新增证据，当前结论已经可以明确写成：
+---
 
-1. **训练权重确实在变化。**
-   - checkpoint 文件哈希变化；
-   - 离线从 `global_step40/60` 解码，held-out 样本输出明显变化。
-2. **runtime eval 的生成结果却保持不变。**
-   - 本地日志里同一道 held-out 题的 eval 输出跨多个 step 完全相同。
-3. **问题点已经最小化复现到 `update_engine_weights(actor)` 这条同步链。**
-   - 直接改 actor，会影响 actor 自己的直接生成；
-   - 直接改 inference engine，会影响 rollout 生成；
-   - 但 actor 改完后通过 `update_engine_weights(actor)` 同步，rollout 输出不跟着变。
+## 九、现在我对问题的分析
 
-因此，当前最强结论不是：
+### 9.1 我现在最认可的解释
 
-- “模型没训练”
+当前我最认可的解释是：
 
-而是：
+- 训练 actor 确实在变；
+- 真实 checkpoint 也确实在变；
+- 但是 runtime eval 复用的是 separate local HF rollout actor；
+- 这条 rollout actor 的权重同步没有正确反映当前 actor 的最新权重；
+- 所以 eval 每次实际上都在用 stale rollout 权重做生成；
+- 因而固定 held-out + greedy eval 的文本和指标全都变成了一条死线。
 
-- **separate local HF rollout actor 的权重同步链有问题，导致 runtime eval 基本吃的是 stale rollout 权重。**
+### 9.2 为什么我现在不再把主要怀疑放在“训练不收敛”
 
-## 还差什么
+因为“不收敛”和“完全不抖”不是一回事。
 
-虽然主结论已经足够明确，但如果后续要继续把证据再补满，剩下两项仍可做：
+如果只是训练效果不好，常见表现应该是：
 
-1. 在 8 卡 `torchrun` 拓扑下复跑同样的最小化同步 probe，确认该问题在真实训练拓扑下同样复现。
-2. 进一步把 `_copy_local_hf_rollout_actor_state(...)` 拆成“逐参数 local shard checksum”验证，精确确认到底是：
-   - `DTensor.copy_` 本身语义不对；
-   - 还是 source / destination 参数视图不是当前 forward 真正使用的那份存储。
+- 指标有波动但不提升；
+- 样本输出偶尔变化但总体不稳定；
+- 甚至 reward / acc 在某些阶段变差。
 
-但这两项已经属于“进一步加固证据”，不是当前诊断成立所必需的前提。
+但现在看到的是：
 
-## 与“模型是否真的在训练”相关的证据
+- held-out 样本的原始生成文本跨多个 eval step 逐字不变；
+- 聚合指标跨多个 eval step 逐值不变；
+- 而离线 checkpoint decode 又已经证明真实权重行为会变。
 
-### 1. checkpoint 保存配置是明确开启的
+这更像“runtime eval 没有真正接上最新权重”，而不是“模型学不会”。
 
-launcher 中：
+### 9.3 还没有完全闭环的地方
 
-- `SAVE_STEPS=20`
-- `MAX_CKPT_NUM=2`
-- `--save_steps ${SAVE_STEPS}`
-- `--ckpt_path results/...`
+虽然当前结论已经很强，但还差两步可以进一步把锅钉死：
 
-这意味着 checkpoint 正常应该每 20 step 保存一次，并且只保留最新 2 个。
+1. 现在最强的最小化 probe 是单卡 FSDP 环境下做的。
+   - 它已经足够说明同步语义有问题；
+   - 但还没在真实 8 卡 `torchrun` 拓扑下复跑。
+2. 现在是用“输出有无变化”来判断同步是否生效。
+   - 还没把每个关键参数在 sync 前后逐项做 local shard checksum。
 
-### 2. `pjctfbbs` 的 checkpoint 保存记录
+这两步补上之后，根因就能从“高度怀疑”变成“几乎板上钉钉”。
 
-本地日志明确记录了：
+---
 
-- `global_step20`
-- `global_step40`
-- `global_step60`
+## 十、下一步打算继续排查的部分
 
-并且在保存 `global_step60` 前删除了 `global_step20`。
+下一步我建议按下面顺序继续做，不要再大面积发散。
 
-所以当前磁盘上保留的是：
-
-- `.../_actor/global_step40`
-- `.../_actor/global_step60`
-
-### 3. checkpoint 文件格式
-
-当前 FSDP checkpoint 不是 HF `save_pretrained` 目录，而是 DCP shard：
-
-- `.metadata`
-- `__0_0.distcp`
-- `__1_0.distcp`
-- ...
-- `__7_0.distcp`
-- `client_state.pt`
-
-### 4. `step40` 与 `step60` 的 checkpoint 字节内容不同
-
-对 `pjctfbbs` 的 `global_step40` 和 `global_step60` 做 SHA256 对比后，至少下面这些 shard 已确认不同：
-
-- `__0_0.distcp`
-  - `step40`: `314e6d93abf35ee0712fb1b9ca928f0dea9764e3e1da2ffa0f927b315874051b`
-  - `step60`: `72d63d9f7db6b164dfe3b82a066e389cf494179214cafdbba61dc5c08ea490d4`
-- `__1_0.distcp`
-  - `step40`: `10d4e34ef4a2d0c86e214bfc208f310e04ba6f27d149d8f152bce73236a9f6f8`
-  - `step60`: `55a67f62830f47345f1bd234d378c06287f575728bb7defa51137882aba439d4`
-- `__2_0.distcp`
-  - `step40`: `48e6021ea2f0941d56100f7d912c05418dd9c88d406ca4579f90f08216c13624`
-  - `step60`: `8af6e408a998bdea35f05a800c51ac2dcc994ccd03cfc6bd4f4bf8241e4ce0b6`
-
-这条证据非常关键：
-
-- 它不能证明“训练质量没问题”
-- 但它已经足够证明“磁盘上保存出来的 actor 权重不是完全一样的旧文件”
-
-因此，`pjctfbbs` 不能直接归因成“权重根本没保下来”。
-
-## 与“eval 链路是否吃到更新权重”相关的证据
-
-### 1. trainer 每轮 PPO 后都会调用 `update_engine_weights()`
-
-`spmd_ppo_trainer.py` 中，`ppo_train()` 的顺序是：
-
-1. 训练 actor
-2. `self.strategy.update_engine_weights(self.actor)`
-3. 返回状态
-4. 外层 `fit()` 再调用 `save_logs_and_checkpoints()`
-
-所以从调用顺序上看，eval 本应发生在 rollout/eval engine 权重同步之后。
-
-### 2. `pjctfbbs` 日志里确实反复打印了同步成功
-
-日志中能看到大量类似：
-
-- `Finished update engine weights for separate local HF rollout actor {'copy_state_s': ...}`
-
-这说明：
-
-- 不是压根没调用同步
-- 至少代码层面走到了 `hf_separate_rollout_actor` 的状态复制分支
-
-### 3. 但这还不能完全证明 eval 实际用到的是“最新权重”
-
-当前还缺最后一层硬证据：
-
-- `update_engine_weights()` 的确被调用了
-- checkpoint 字节内容也变了
-- 但没有直接证明 eval 真正消费的是更新后的 rollout actor，而不是某个 stale object / stale state
-
-因此，这一块目前仍然是主要怀疑点之一。
-
-## 对当前现象的具体判断
-
-### 已经可以排除的解释
-
-- **不是“eval 根本没有触发”。**
-- **不是“没有 checkpoint 保存能力”。**
-- **不是“权重根本没落盘”。**
-- **不是纯 W&B 面板画图问题。**
-
-### 还不能排除的解释
-
-- **eval 使用了 stale rollout/eval 模型。**
-- **训练 actor 确实变了，但 greedy held-out 输出没有变化。**
-- **训练 actor 在数值上有变化，但这些变化主要落在对当前 eval 指标无影响的部分。**
-- **eval 复用 `experience_maker` 后，某处存在隐式缓存或状态复用。**
-
-### 当前最值得优先怀疑的点
-
-如果按“链路问题优先”的思路，目前最值得继续盯的点是：
-
-1. `hf_separate_rollout_actor=True` 时，eval 实际走的对象是否就是刚同步过的 `self.inference_engine`
-2. `experience_maker.make_experience_list(...)` 在 eval 模式下是否有状态复用
-3. `update_engine_weights()` 虽然被调用，但是否真的覆盖了 eval 正在使用的参数对象
-
-## 历史 run 的 checkpoint 位置
-
-这部分保留，是为了后续继续做“train 是否真的更新”时能快速定位旧权重。
-
-### `51q21rc5`
-
-- W&B：`https://wandb.ai/hansbug/LightRFT-URSA8B-Stage3/runs/51q21rc5`
-- 结果目录：`results/lightrft-ursa8b-stage3-psgrpo/lightrft-ursa8b-stage3-psgrpo-ep10-kl0.001-lr1e-6-20260322_001210`
-- 当前保留：
-  - `_actor/global_step20`
-
-### `y9sulzln`
-
-- W&B：`https://wandb.ai/hansbug/LightRFT-URSA8B-Stage3/runs/y9sulzln`
-- 结果目录：`results/lightrft-ursa8b-stage3-psgrpo/lightrft-ursa8b-stage3-psgrpo-ep10-kl0.001-lr1e-6-20260322_101842`
-- 历史上保存过：
-  - `20/40/60/80/100/120/140`
-- 因为 `max_ckpt_num=2`，当前保留：
-  - `_actor/global_step120`
-  - `_actor/global_step140`
-
-### `unuz8bej`
-
-- W&B：`https://wandb.ai/hansbug/LightRFT-URSA8B-Stage3/runs/unuz8bej`
-- 结果目录：`results/lightrft-ursa8b-stage3-psgrpo/lightrft-ursa8b-stage3-psgrpo-ep10-kl0.001-lr1e-6-20260324_190752`
-- 当前保留：
-  - `_actor/global_step20`
-  - `_actor/global_step40`
-
-### `pjctfbbs`
-
-- W&B：`https://wandb.ai/hansbug/LightRFT-URSA8B-Stage3/runs/pjctfbbs`
-- 结果目录：`results/lightrft-ursa8b-stage3-psgrpo/lightrft-ursa8b-stage3-psgrpo-ep10-kl0.001-lr1e-6-20260325_114828`
-- 当前保留：
-  - `_actor/global_step40`
-  - `_actor/global_step60`
-
-### 对照：`da0cx5ok` / `vo45u2kd`
-
-这两个较早 run 当前结果目录里只有 `trajectories/`，没有 `_actor/`：
-
-- `results/lightrft-ursa8b-stage3-real-default-v13b/...20260320_235558`
-- `results/lightrft-ursa8b-stage3-real-default-v14/...20260321_005344`
-
-目前没找到它们成功保存 DCP checkpoint 的日志证据。
-
-## 当前还差的验证
-
-下面这些是下一步最有价值的验证项。
-
-### 1. 直接比较 `global_step40` 和 `global_step60` 的参数差异
+### 10.1 在真实 8 卡 `torchrun` 拓扑下复跑同样的最小化同步 probe
 
 目标：
 
-- 不只比较 shard 文件哈希
-- 要比较若干关键层的 tensor norm / max abs diff / cosine
+- 证明单卡最小化复现到的问题，在真实训练拓扑下同样存在。
 
-意义：
+要验证的点：
 
-- 可以进一步确认“训练 actor 的参数变化到底有多大”
+1. 直接改 rollout inference engine，输出应立刻变化。
+2. 直接改 actor，本体 direct generate 应变化。
+3. 改 actor 后走 `update_engine_weights(actor)`，rollout 输出是否仍然不变。
 
-### 2. 用 `global_step40` 和 `global_step60` 在同一 held-out 样本上离线 decode
+如果 8 卡下也复现，那么就可以非常强地说：
 
-目标：
+- 线上训练的 eval flatness 就是同步链问题，而不是单卡 probe 的偶然现象。
 
-- 用相同 prompt、相同 greedy 配置、相同 processor
-- 直接比对输出文本是否有变化
-
-意义：
-
-- 可以区分“权重变了但 greedy 输出没变”和“eval 可能拿到 stale 模型”
-
-### 3. 在 eval 前打印 rollout actor / inference engine 的参数签名
+### 10.2 对关键参数做 sync 前后的 checksum / signature 对比
 
 目标：
 
-- 在每次 `update_engine_weights()` 后和每次 `evaluate()` 前
-- 打印固定若干层参数 checksum / norm
+- 不再只看文本输出，而是直接看参数有没有真的同步过去。
 
-意义：
+优先对比的参数：
 
-- 可以最直接验证 eval 实际消费的对象是否被同步过
+- `model.language_model.lm_head.weight`
+- 几个 decoder layer 的 `q_proj.weight`
+- 几个 decoder layer 的 `down_proj.weight`
+- vision tower 中至少一个代表性参数
 
-### 4. 检查 `experience_maker` 是否存在 eval 期间的隐式缓存或状态复用
+想确认的事情：
 
-重点看：
+1. actor 参数在变；
+2. rollout 参数在 sync 前不变；
+3. 调用 `_copy_local_hf_rollout_actor_state(...)` 后，rollout 参数到底有没有跟 actor 对齐。
 
-- 生成输入是否每次都重新构造
-- 奖励模型/后处理是否引用上一次状态
-- 是否存在和 train path 共享的残留状态
+### 10.3 明确 `DTensor.copy_()` 在这个场景下的实际语义
 
-## 当前判断的工作结论
+目标：
 
-截至本次记录，可以明确写下来的结论是：
+- 查清当前同步代码到底是在 copy：
+  - local shard；
+  - global view；
+  - 还是一个不参与 forward 的包装视图。
 
-- `pjctfbbs` 的 eval 问题是真问题，不是只在 W&B 上看起来像问题。
-- 当前更像是 **eval 链路没有反映训练后的行为变化**，而不是“eval 根本没跑”。
-- 同时，训练侧和 checkpoint 侧也不是完全静止的，至少 actor checkpoint 的字节内容已经变化。
-- 因此，后续排查应优先围绕 **eval 是否真正使用了更新后的 rollout/eval 模型** 来做，而不是先把锅完全甩给“模型一点都没训练”。
+重点怀疑：
+
+- `src_param.detach()` 和 `dst_param.detach()` 都是 `DTensor`；
+- 在 FSDP 的 fully_shard 后，这样直接 `copy_` 未必等于把当前可生成的 live state 从 actor 同步到 rollout。
+
+### 10.4 在主训练链上加一次最小日志埋点
+
+如果后续开始改代码前还想再稳一点，我建议临时加最小日志：
+
+1. 每次 `update_engine_weights(actor)` 前后，对固定参数打一个短 checksum。
+2. eval 开始前，对 rollout actor 同一参数再打一个 checksum。
+3. 再对固定 held-out 样本打一个短 hash。
+
+这样可以直接把线上 run 的证据链串起来：
+
+- actor checksum 变了；
+- rollout checksum 没变；
+- eval sample hash 不变。
+
+这会是最干净的一套线上闭环证据。
+
+---
+
+## 十一、最终一句话版本
+
+如果只用一句话概括当前诊断结果，那就是：
+
+- **`pjctfbbs` 的 eval 完全不动，不是因为模型没训练，而是因为 runtime eval 大概率一直在用 stale 的 separate local HF rollout 权重；问题最像出在 `update_engine_weights(actor)` 的 FSDP / DTensor 同步语义上。**
+
+---
+
+## 十二、后续解决 Checklist
+
+### 12.1 继续检查
+
+- [ ] 在真实 8 卡 `torchrun` 拓扑下复跑最小化同步 probe，确认单卡复现不是偶然现象。
+- [ ] 对 `model.language_model.lm_head.weight` 做 sync 前后的 local shard checksum，对比 actor 与 rollout actor 是否真的一致。
+- [ ] 对 1 到 2 个 decoder layer 的代表性参数做同样 checksum，对比问题是否只出现在 `lm_head`，还是更普遍地存在于全部参数同步。
+- [ ] 对 vision tower / aligner 各选一个代表性参数做 checksum，确认多模态部分是否同样存在同步失效。
+- [ ] 明确 `src_param.detach()` / `dst_param.detach()` 在当前 FSDP `DTensor` 场景下拿到的到底是什么视图，确认是不是 copy 到了错误对象。
+- [ ] 确认 rollout actor 在 `setup_inference_engine(...)` 后实际参与 `generate` 的 live module 与 `named_parameters()` 遍历出来的参数对象是不是同一套存储。
+- [ ] 确认 `keep_on_gpu=True` 分支下，`torch.cuda.synchronize()` + `barrier()` 之后是否还缺少额外的 refresh / materialize 步骤。
+- [ ] 把最小化 probe 再扩一版，直接在 sync 前后打印固定参数的短 signature，避免只靠文本输出来推断。
+
+### 12.2 可以做的修复方向
+
+- [ ] 把当前 `dst_param.detach().copy_(src_tensor)` 的同步逻辑替换成显式的 local shard copy，避免依赖 `DTensor.copy_` 的隐式语义。
+- [ ] 如果 local shard copy 仍然不稳定，改成显式 gather 到 full state 后再同步到 rollout actor，先保证语义正确，再回头优化性能。
+- [ ] 如果发现 source / destination 参数对象不是 live storage，改成沿着 rollout `generate` 实际使用的 module 路径拿参数，而不是只按 `named_parameters()` 对齐。
+- [ ] 在 `update_engine_weights(actor)` 中增加一个可开关的 debug assert：同步后抽查若干关键参数的 checksum，不一致就直接报错。
+- [ ] 在 runtime eval 前增加一个轻量 guardrail：打印固定参数短 hash 和固定 held-out 样本输出 hash，后续一眼就能看出是否又回到 stale 状态。
+- [ ] 如果 separate local HF rollout actor 这条链短期内难以修稳，先准备一个保底修复方案：eval 临时直接复用 actor 本体做 local HF generate，不走 separate rollout actor，同步保证正确性。
+- [ ] 如果 separate rollout 只在 eval 上出问题，也可以考虑训练 rollout 继续用 separate actor，但 runtime eval 切到 actor-direct path，先把监控可信度恢复。
+
+### 12.3 修复后验证
+
+- [ ] 修复后重新跑最小化 probe，验证“改 actor 后 sync，rollout 输出会跟着变化”。
+- [ ] 修复后重新跑离线 held-out 对比，确认 runtime eval 的首样本文本会与对应 checkpoint decode 一致或至少同步变化。
+- [ ] 修复后做一个极短训练 smoke run，确认 eval 指标不再是严格常数。
+- [ ] 修复后检查 `copy_state_s`、显存占用、生成耗时，确认修复没有把同步成本推到不可接受的程度。
+- [ ] 修复后保留一轮带 debug 日志的 run，确认线上链路证据闭环，然后再把额外 debug 日志关掉。
