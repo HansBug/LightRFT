@@ -27,15 +27,18 @@
    - checkpoint 在持续保存；
    - step40 / step60 的 shard 内容不同；
    - 离线从 step40 / step60 checkpoint 直接 decode，同一 held-out 样本的输出会变化。
-4. **最可能的问题点已经收敛到 separate local HF rollout actor 的权重同步链。**
-   - 直接改 inference engine，自然会让 rollout 输出变化；
-   - 直接改 actor，本体 direct generate 也会变化；
-   - 但改完 actor 再调用 `update_engine_weights(actor)`，rollout 输出不跟着变化。
+4. **separate local HF rollout actor 的“参数 copy”本身不是完全失效。**
+   - 单卡和真实 8 卡 `torchrun` 下，`lm_head` / decoder / vision / aligner 的 local shard signature 都能在 sync 后变化；
+   - `named_parameters()`、module live attribute、`detach()` 在当前检查的参数上都指向同一份 local storage。
+5. **更具体的问题已经收敛到 `hf_separate_rollout_keep_on_gpu=True` 分支缺少 refresh / materialize。**
+   - 仅调用 `update_engine_weights(actor)` 后，固定样本 rollout 输出仍可能完全不变；
+   - 但只要手工做一次 `offload_model(self.inference_engine)` + `reload_model(self.inference_engine)`，同样的同步结果会立刻体现在 rollout 输出上；
+   - `keep_on_gpu=False` 的对照组天然会在下次 generate 前走 wakeup / reload，因此输出会立刻变化。
 
 所以当前最强判断不是“模型没训练”，而是：
 
 - **runtime eval 大概率没有真正吃到最新训练 actor 的权重。**
-- **问题更像出在 `update_engine_weights(actor)` 到 separate rollout actor 的同步语义上。**
+- **更准确地说，问题最像出在 `update_engine_weights(actor)` 之后，`keep_on_gpu=True` 这条 local HF rollout generate 路径没有把已同步的新权重 materialize 到实际生成所用的 GPU 态。**
 
 ---
 
@@ -607,13 +610,13 @@ def update_engine_weights(self, actor):
 
 当前最可疑的问题点是：
 
-- `src_param` / `dst_param` 在 FSDP `DTensor` 场景下，`detach().copy_()` 的语义可能并没有把真正参与 forward 的那份有效参数内容同步过去；
-- 或者 source / destination 虽然名字一一对应，但当前复制到的对象并不是 rollout generate 实际使用的 live storage；
-- 又或者 `DTensor` 在这里需要的是显式 local shard / full state materialization，而不是当前这种直接 `copy_`。
+- `src_param` / `dst_param` 的 `detach().copy_()` 从参数 signature 上看是生效的，但 `keep_on_gpu=True` 分支里，copy 完成之后并没有显式 refresh / reload rollout actor；
+- 因而当前更像是：copy 写到了 rollout actor 持有的那份参数对象上，但 local HF generate 实际吃到的 GPU 态没有被重新 materialize；
+- 反过来，`keep_on_gpu=False` 时下次 generate 会走 wakeup / reload，所以这条对照组能正常看到新参数。
 
 注意，这里最关键的一点不是“代码看起来对不对”，而是：
 
-- **最小化 probe 已经说明这段同步的行为效果不对。**
+- **最小化 probe 已经说明：问题不是“copy 完全失败”，而是“keep_on_gpu=True` 下 copy 之后 generate 仍然可能看不到新值”。**
 
 ---
 
@@ -625,9 +628,11 @@ def update_engine_weights(self, actor):
 
 - 训练 actor 确实在变；
 - 真实 checkpoint 也确实在变；
-- 但是 runtime eval 复用的是 separate local HF rollout actor；
-- 这条 rollout actor 的权重同步没有正确反映当前 actor 的最新权重；
-- 所以 eval 每次实际上都在用 stale rollout 权重做生成；
+- runtime eval 复用的是 separate local HF rollout actor；
+- separate rollout actor 的参数 copy 本身是成功的；
+- 但在 `hf_separate_rollout_keep_on_gpu=True` 下，`update_engine_weights(actor)` 后只做 `torch.cuda.synchronize()` + `barrier()` 还不够；
+- rollout generate 很可能继续复用旧的 GPU materialization；
+- 只有在 `offload + reload` 之后，新参数才会真正反映到输出上；
 - 因而固定 held-out + greedy eval 的文本和指标全都变成了一条死线。
 
 ### 9.2 为什么我现在不再把主要怀疑放在“训练不收敛”
@@ -648,17 +653,17 @@ def update_engine_weights(self, actor):
 
 这更像“runtime eval 没有真正接上最新权重”，而不是“模型学不会”。
 
-### 9.3 还没有完全闭环的地方
+### 9.3 现在已经补完的关键闭环
 
-虽然当前结论已经很强，但还差两步可以进一步把锅钉死：
+这轮补充检查已经把之前还缺的两步补上了：
 
-1. 现在最强的最小化 probe 是单卡 FSDP 环境下做的。
-   - 它已经足够说明同步语义有问题；
-   - 但还没在真实 8 卡 `torchrun` 拓扑下复跑。
-2. 现在是用“输出有无变化”来判断同步是否生效。
-   - 还没把每个关键参数在 sync 前后逐项做 local shard checksum。
+1. 真实 8 卡 `torchrun` 拓扑已经复跑。
+2. 关键参数的 local shard checksum / signature 已经逐项对过。
 
-这两步补上之后，根因就能从“高度怀疑”变成“几乎板上钉钉”。
+补完之后，根因比之前更清楚了：
+
+- 不是“`update_engine_weights(actor)` 完全没把参数写过去”；
+- 而是“参数已经写过去了，但 `keep_on_gpu=True` 这条 generate 路径没有把新参数 refresh 到实际生成所用的 GPU 态”。
 
 ---
 
@@ -733,40 +738,336 @@ def update_engine_weights(self, actor):
 
 ---
 
-## 十一、最终一句话版本
+## 十一、补充检查：问题进一步收敛到 `keep_on_gpu=True` 缺 refresh
 
-如果只用一句话概括当前诊断结果，那就是：
+### 11.1 `detach()` / live storage 不是这次问题的主因
 
-- **`pjctfbbs` 的 eval 完全不动，不是因为模型没训练，而是因为 runtime eval 大概率一直在用 stale 的 separate local HF rollout 权重；问题最像出在 `update_engine_weights(actor)` 的 FSDP / DTensor 同步语义上。**
+单卡 probe 里，`actor` 和 `rollout_actor` 的关键参数都呈现同样的关系：
+
+```json
+{
+  "model.language_model.lm_head.weight": {
+    "named_is_live_obj": true,
+    "named_local_ptr_eq_live": true,
+    "named_detach_ptr_eq_named": true,
+    "live_detach_ptr_eq_live": true
+  },
+  "model.language_model.model.layers.0.self_attn.q_proj.weight": {
+    "named_is_live_obj": true,
+    "named_local_ptr_eq_live": true,
+    "named_detach_ptr_eq_named": true,
+    "live_detach_ptr_eq_live": true
+  }
+}
+```
+
+我又把同样的关系检查放到真实 8 卡 `torchrun` 的 rank0 上复核，结果仍然是：
+
+```text
+8gpu rank0 summary
+actor_relations True
+rollout_relations True
+```
+
+这说明：
+
+- 目前检查到的关键参数上，`named_parameters()`、module live attribute、`detach()` 并没有明显脱节；
+- 问题不再像之前那样指向“copy 到了错误对象”。
+
+### 11.2 单卡 `keep_on_gpu=False` 对照组：参数变，输出也立刻变
+
+单卡 `keep_on_gpu=False` 的 audit 同时做了参数 signature 和 generate 对照。
+
+关键参数在 sync 后都变成了同一个全零 hash：
+
+```text
+single-card, keep_on_gpu=false
+lm_head: baseline=23f00ebb3d91b639 -> post_sync=4fe7b59af6de3b66
+layer0.q_proj: baseline=9d0fc8e9da63f4db -> post_sync=4fe7b59af6de3b66
+layer27.down_proj: baseline=79635bede86ef493 -> post_sync=4fe7b59af6de3b66
+vision.patch_embed: baseline=1f99b9fabb2a08b8 -> post_sync=4fe7b59af6de3b66
+aligner.layers.1: baseline=0432e5c0ae3aceb4 -> post_sync=4fe7b59af6de3b66
+```
+
+对应 generate 输出也立刻变化：
+
+```json
+{
+  "keep_rollout_on_gpu": false,
+  "sync_stats": {
+    "total_s": 30.6783,
+    "keep_on_gpu": false,
+    "actor_offloaded": true,
+    "copy_state_s": 10.0303
+  },
+  "rollout_generate_before": {
+    "text": "Step 1: Observe the image. The image shows a landscape with a plane flying in the sky and another plane on the ground.\n\nStep 2: Analyze the landscape. The ground appears to be mostly flat, with some variations in elevation.\n\nStep 3: Determine if the landscape is flat. Based<|im_end|>"
+  },
+  "rollout_generate_after": {
+    "text": "!!!!\"!!!#!!!$!!!%!!!&!!!'!!!(!!!)!!!*!!!+!!!,!!!-!!!.!!!/!!!0!!<|im_end|>"
+  }
+}
+```
+
+这说明：
+
+- offload 分支下，参数 sync 和 generate 行为是一致的；
+- 这里只要参数被改坏，下一次 rollout 就会立刻反映出来。
+
+### 11.3 `keep_on_gpu=True`：不 refresh 时，参数已经变了，但输出仍然不变
+
+我先把之前那个“无 refresh”的旧 probe 按原命令重新跑了一遍：
+
+```json
+{
+  "tokens_changed": false,
+  "mutate_target": "actor",
+  "mutate_mode": "all_zero",
+  "before_text": "Step 1: Observe the image. The image shows a landscape with a plane flying in the sky and another plane on the ground.\n\nStep 2: Analyze the landscape. The ground appears to be mostly flat, with some variations in elevation.\n\nStep 3: Determine if the landscape is flat. Based<|im_end|>",
+  "after_text": "Step 1: Observe the image. The image shows a landscape with a plane flying in the sky and another plane on the ground.\n\nStep 2: Analyze the landscape. The ground appears to be mostly flat, with some variations in elevation.\n\nStep 3: Determine if the landscape is flat. Based<|im_end|>",
+  "sync_stats": {
+    "total_s": 36.4599,
+    "keep_on_gpu": true,
+    "copy_state_s": 36.4478
+  }
+}
+```
+
+但另一条同样是 `keep_on_gpu=True`、且不做 refresh 的 signature probe 显示，rollout 参数其实已经变了：
+
+```json
+{
+  "initial_actor_sig": {
+    "sum": 4068.70166,
+    "mean": 0.496668
+  },
+  "mutated_actor_sig": {
+    "sum": 12260.701172,
+    "mean": 1.496668
+  },
+  "pre_sync_rollout_sig": {
+    "sum": 4068.70166,
+    "mean": 0.496668
+  },
+  "post_sync_rollout_sig": {
+    "sum": 12249.101562,
+    "mean": 1.495252
+  },
+  "rollout_matches_actor_after_sync": false,
+  "rollout_changed_after_sync": true,
+  "sync_stats": {
+    "keep_on_gpu": true,
+    "copy_state_s": 33.8433
+  }
+}
+```
+
+这两条合在一起非常关键：
+
+- **`keep_on_gpu=True` 下，参数 signature 已经在 sync 后变化；**
+- **但如果不 refresh，固定样本 generate 仍然可能保持旧输出。**
+
+所以现在已经不能再说“copy 没写进去”，而应该说：
+
+- **copy 写进去了，但 generate 没看到。**
+
+### 11.4 `keep_on_gpu=True`：手工 `offload + reload` 后，同样的同步立刻生效
+
+我把 audit 脚本补成了 `keep_on_gpu=True` 时在 sync 之后手工做一次：
+
+1. `offload_model(self.inference_engine)`
+2. `reload_model(self.inference_engine)`
+
+然后再 generate。
+
+结果如下：
+
+```json
+{
+  "same_hash_post_and_refresh": {
+    "model.language_model.lm_head.weight": [
+      "4fe7b59af6de3b66",
+      "4fe7b59af6de3b66"
+    ],
+    "model.language_model.model.layers.0.self_attn.q_proj.weight": [
+      "4fe7b59af6de3b66",
+      "4fe7b59af6de3b66"
+    ],
+    "model.language_model.model.layers.27.mlp.down_proj.weight": [
+      "4fe7b59af6de3b66",
+      "4fe7b59af6de3b66"
+    ],
+    "model.vision_model.vision_tower_high.vision_tower.patch_embed.proj.weight": [
+      "4fe7b59af6de3b66",
+      "4fe7b59af6de3b66"
+    ],
+    "model.aligner.layers.1.weight": [
+      "4fe7b59af6de3b66",
+      "4fe7b59af6de3b66"
+    ]
+  },
+  "before_eq_after": false,
+  "after_text": "!!!!\"!!!#!!!$!!!%!!!&!!!'!!!(!!!)!!!*!!!+!!!,!!!-!!!.!!!/!!!0!!<|im_end|>"
+}
+```
+
+以及完整 audit 里的关键片段：
+
+```json
+{
+  "refresh_stats": {
+    "performed_manual_offload_reload": true
+  },
+  "sync_stats": {
+    "total_s": 33.7189,
+    "keep_on_gpu": true,
+    "copy_state_s": 33.7078
+  },
+  "rollout_generate_before": {
+    "text": "Step 1: Observe the image. The image shows a landscape with a plane flying in the sky and another plane on the ground.\n\nStep 2: Analyze the landscape. The ground appears to be mostly flat, with some variations in elevation.\n\nStep 3: Determine if the landscape is flat. Based<|im_end|>"
+  },
+  "rollout_generate_after": {
+    "text": "!!!!\"!!!#!!!$!!!%!!!&!!!'!!!(!!!)!!!*!!!+!!!,!!!-!!!.!!!/!!!0!!<|im_end|>"
+  }
+}
+```
+
+这说明：
+
+- `keep_on_gpu=True` 不是“永远不能同步”；
+- 它的问题更像是：**copy 完之后，还缺一个让 generate 重新看到这份状态的 refresh / materialize 动作。**
+
+### 11.5 真实 8 卡 `torchrun` 拓扑下同样成立
+
+我又把同样的 audit 放到真实 8 卡 `torchrun` 下重跑了一次，结果如下：
+
+```text
+world_size 8
+model.language_model.lm_head.weight unique_post_sync_hashes ['4fe7b59af6de3b66']
+model.language_model.model.layers.0.self_attn.q_proj.weight unique_post_sync_hashes ['4fe7b59af6de3b66']
+model.language_model.model.layers.27.mlp.down_proj.weight unique_post_sync_hashes ['4fe7b59af6de3b66']
+model.vision_model.vision_tower_high.vision_tower.patch_embed.proj.weight unique_post_sync_hashes ['4fe7b59af6de3b66']
+model.aligner.layers.1.weight unique_post_sync_hashes ['4fe7b59af6de3b66']
+all_rollout_after_text_same True
+sample_after_text !!!!"!!!#!!!$!!!%!!!&!!!'!!!(!!!)!!!*!!!+!!!,!!!-!!!.!!!/!!!0!!<|im_end|>
+all_refresh_performed True
+```
+
+rank0 的完整 audit 片段也和单卡结论一致：
+
+```json
+{
+  "rollout_post_sync": {
+    "model.language_model.lm_head.weight": {
+      "hash16": "4fe7b59af6de3b66"
+    },
+    "model.language_model.model.layers.0.self_attn.q_proj.weight": {
+      "hash16": "4fe7b59af6de3b66"
+    },
+    "model.language_model.model.layers.27.mlp.down_proj.weight": {
+      "hash16": "4fe7b59af6de3b66"
+    },
+    "model.vision_model.vision_tower_high.vision_tower.patch_embed.proj.weight": {
+      "hash16": "4fe7b59af6de3b66"
+    },
+    "model.aligner.layers.1.weight": {
+      "hash16": "4fe7b59af6de3b66"
+    }
+  },
+  "rollout_generate_after": {
+    "text": "!!!!\"!!!#!!!$!!!%!!!&!!!'!!!(!!!)!!!*!!!+!!!,!!!-!!!.!!!/!!!0!!<|im_end|>"
+  }
+}
+```
+
+这条证据非常关键，因为它说明：
+
+- 这不是单卡 probe 的偶然现象；
+- 真实 8 卡训练拓扑下也同样支持“参数已经 sync，但要 refresh 之后 generate 才会立刻吃到”的判断。
+
+### 11.6 为什么这能解释线上 eval flatness
+
+现在回头看 `strategy_base.py` 里的分支逻辑，问题就更像了。
+
+`update_engine_weights(actor)` 最终会走到：
+
+```python
+if keep_on_gpu:
+    torch.cuda.synchronize()
+    torch.distributed.barrier()
+    self.inference_engine_status = EngineStatus.WAKEUP
+else:
+    self.inference_engine_status = EngineStatus.SLEEPED
+    self.sync_and_clear_cache()
+```
+
+而 `keep_on_gpu=False` 的下一次 generate，会走 wakeup 分支里的：
+
+```python
+if self._uses_separate_hf_rollout_actor():
+    if self.rollout_train_actor_is_on_gpu:
+        self.offload_model(self.rollout_train_actor)
+        self.rollout_train_actor_is_on_gpu = False
+    self.reload_model(self.inference_engine)
+    self._prepare_separate_hf_rollout_actor_for_generation()
+```
+
+也就是说：
+
+- `keep_on_gpu=False` 这条链天然会 reload rollout actor；
+- `keep_on_gpu=True` 这条链目前只做 synchronize / barrier，不做 reload；
+- 而我的最小化 probe 已经证明：
+  - 仅 synchronize / barrier 不足以让 generate 看见新值；
+  - 手工 `offload + reload` 之后，新值会立刻生效。
+
+所以当前最合理的解释已经进一步收敛为：
+
+- **线上 runtime eval flat，不是因为 actor 没训练、也不是因为 checkpoint 没变，而是因为 `hf_separate_rollout_keep_on_gpu=True` 这条链在 `update_engine_weights(actor)` 之后缺少 refresh / materialize，导致 eval 长时间复用 stale 的 GPU-resident rollout weights。**
 
 ---
 
-## 十二、后续解决 Checklist
+## 十二、最终一句话版本
 
-### 12.1 继续检查
+如果只用一句话概括当前诊断结果，那就是：
 
-- [ ] 在真实 8 卡 `torchrun` 拓扑下复跑最小化同步 probe，确认单卡复现不是偶然现象。
-- [ ] 对 `model.language_model.lm_head.weight` 做 sync 前后的 local shard checksum，对比 actor 与 rollout actor 是否真的一致。
-- [ ] 对 1 到 2 个 decoder layer 的代表性参数做同样 checksum，对比问题是否只出现在 `lm_head`，还是更普遍地存在于全部参数同步。
-- [ ] 对 vision tower / aligner 各选一个代表性参数做 checksum，确认多模态部分是否同样存在同步失效。
-- [ ] 明确 `src_param.detach()` / `dst_param.detach()` 在当前 FSDP `DTensor` 场景下拿到的到底是什么视图，确认是不是 copy 到了错误对象。
-- [ ] 确认 rollout actor 在 `setup_inference_engine(...)` 后实际参与 `generate` 的 live module 与 `named_parameters()` 遍历出来的参数对象是不是同一套存储。
-- [ ] 确认 `keep_on_gpu=True` 分支下，`torch.cuda.synchronize()` + `barrier()` 之后是否还缺少额外的 refresh / materialize 步骤。
-- [ ] 把最小化 probe 再扩一版，直接在 sync 前后打印固定参数的短 signature，避免只靠文本输出来推断。
+- **`pjctfbbs` 的 eval 完全不动，不是因为模型没训练，而是因为 `hf_separate_rollout_keep_on_gpu=True` 的 separate local HF rollout actor 在 `update_engine_weights(actor)` 后没有做足够的 refresh / materialize；参数 signature 已经变了，但 runtime eval 仍可能继续吃旧的 GPU rollout 权重，只有走 `offload + reload` 后新权重才立刻生效。**
 
-### 12.2 可以做的修复方向
+---
+
+## 十三、后续解决 Checklist
+
+### 13.1 继续检查
+
+- [x] 在真实 8 卡 `torchrun` 拓扑下复跑最小化同步 probe，确认单卡复现不是偶然现象。
+- [x] 对 `model.language_model.lm_head.weight` 做 sync 前后的 local shard checksum，对比 actor 与 rollout actor 是否真的一致。
+- [x] 对 1 到 2 个 decoder layer 的代表性参数做同样 checksum，对比问题是否只出现在 `lm_head`，还是更普遍地存在于全部参数同步。
+- [x] 对 vision tower / aligner 各选一个代表性参数做 checksum，确认多模态部分是否同样存在同步失效。
+- [x] 明确 `src_param.detach()` / `dst_param.detach()` 在当前 FSDP `DTensor` 场景下拿到的到底是什么视图，确认是不是 copy 到了错误对象。
+- [x] 确认 rollout actor 在 `setup_inference_engine(...)` 后实际参与 `generate` 的 live module 与 `named_parameters()` 遍历出来的参数对象是不是同一套存储。
+- [x] 确认 `keep_on_gpu=True` 分支下，`torch.cuda.synchronize()` + `barrier()` 之后是否还缺少额外的 refresh / materialize 步骤。
+- [x] 把最小化 probe 再扩一版，直接在 sync 前后打印固定参数的短 signature，避免只靠文本输出来推断。
+- [ ] 直接在同一个最小化脚本里同时打印：`post_sync` 参数 hash、refresh 前样本输出 hash、refresh 后样本输出 hash，避免以后再靠多份 probe 拼结论。
+- [ ] 沿 `runtime eval -> gather_and_generate -> engine_generate_local` 主链补最小日志，确认线上 eval 当次确实走的是 `keep_on_gpu=True` 且没有任何 `reload_model(self.inference_engine)`。
+- [ ] 进一步缩小 refresh 的最小必要动作，确认到底必须 `offload + reload`，还是单独 `reload_model(self.inference_engine)` / 其他 materialize 动作就够。
+
+### 13.2 可以做的修复方向
+
+根据当前证据，优先级最高的方向已经不是重写 `DTensor.copy_`，而是先把 `keep_on_gpu=True` 分支的 refresh / materialize 语义补正确；`copy_` 重写退到次一级备选。
 
 - [ ] 把当前 `dst_param.detach().copy_(src_tensor)` 的同步逻辑替换成显式的 local shard copy，避免依赖 `DTensor.copy_` 的隐式语义。
 - [ ] 如果 local shard copy 仍然不稳定，改成显式 gather 到 full state 后再同步到 rollout actor，先保证语义正确，再回头优化性能。
 - [ ] 如果发现 source / destination 参数对象不是 live storage，改成沿着 rollout `generate` 实际使用的 module 路径拿参数，而不是只按 `named_parameters()` 对齐。
 - [ ] 在 `update_engine_weights(actor)` 中增加一个可开关的 debug assert：同步后抽查若干关键参数的 checksum，不一致就直接报错。
+- [ ] 优先尝试最小修复：在 `keep_on_gpu=True` 分支下，把 `self.inference_engine_status` 先置回 `SLEEPED`，让下一次 generate 复用现有 wakeup / reload 逻辑。
+- [ ] 如果上面的最小修复不够，再尝试在 `keep_on_gpu=True` 分支内显式调用 rollout actor refresh / reload，而不是只做 `torch.cuda.synchronize()` + `barrier()`。
 - [ ] 在 runtime eval 前增加一个轻量 guardrail：打印固定参数短 hash 和固定 held-out 样本输出 hash，后续一眼就能看出是否又回到 stale 状态。
 - [ ] 如果 separate local HF rollout actor 这条链短期内难以修稳，先准备一个保底修复方案：eval 临时直接复用 actor 本体做 local HF generate，不走 separate rollout actor，同步保证正确性。
 - [ ] 如果 separate rollout 只在 eval 上出问题，也可以考虑训练 rollout 继续用 separate actor，但 runtime eval 切到 actor-direct path，先把监控可信度恢复。
 
-### 12.3 修复后验证
+### 13.3 修复后验证
 
 - [ ] 修复后重新跑最小化 probe，验证“改 actor 后 sync，rollout 输出会跟着变化”。
+- [ ] 修复后专门验证 `keep_on_gpu=True` 下“不做手工 refresh 也会立即反映新权重”。
 - [ ] 修复后重新跑离线 held-out 对比，确认 runtime eval 的首样本文本会与对应 checkpoint decode 一致或至少同步变化。
 - [ ] 修复后做一个极短训练 smoke run，确认 eval 指标不再是严格常数。
 - [ ] 修复后检查 `copy_state_s`、显存占用、生成耗时，确认修复没有把同步成本推到不可接受的程度。
