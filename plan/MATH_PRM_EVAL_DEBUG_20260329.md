@@ -178,6 +178,221 @@
 
 因此这次 `pjctfbbs` 的问题，不是“没有 eval logging key”，而是“eval key 有了，但值恒定”。
 
+## 2026-03-29 新增最小化 probe 结果
+
+本节补充本轮新增的最小化局部验证，目标是把问题从“训练没动”与“eval 链路 stale”之间进一步定性。
+
+### 1. 真实 checkpoint 的离线输出会变化
+
+我先把 `pjctfbbs` 的两个 actor FSDP checkpoint 转成 HF 目录：
+
+- `tmp/ursa_stage3/pjctfbbs_step40_hf`
+- `tmp/ursa_stage3/pjctfbbs_step60_hf`
+
+然后按训练时相同的 held-out 规则：
+
+- `eval_holdout_size=500`
+- `eval_holdout_seed=42`
+
+从 `mmathcot_stage3_math_psgrpo.jsonl` 中取前 8 个 held-out eval 样本，分别用：
+
+- base model
+- `global_step40`
+- `global_step60`
+
+做 greedy decode，对比结果见：
+
+- `tmp/ursa_stage3/compare_eval_checkpoint_decodes_limit8.json`
+
+核心结果：
+
+- `base_vs_step40`: `6/8` 个样本输出发生变化
+- `base_vs_step60`: `6/8` 个样本输出发生变化
+- `step40_vs_step60`: `6/8` 个样本输出发生变化
+
+对应文件中：
+
+- `tmp/ursa_stage3/compare_eval_checkpoint_decodes_limit8.json:12`
+- `tmp/ursa_stage3/compare_eval_checkpoint_decodes_limit8.json:15`
+
+其中第 0 个 held-out 样本就是日志里反复打印的那道“two roads / farmland 551”题。离线 decode 对比显示：
+
+- base / step60：
+  - `Step 1: Let the width of the road be x meters.`
+- step40：
+  - `Step 1: Let the width of of the road be x meters.`
+
+对应文件位置：
+
+- `tmp/ursa_stage3/compare_eval_checkpoint_decodes_limit8.json:19`
+- `tmp/ursa_stage3/compare_eval_checkpoint_decodes_limit8.json:32`
+
+这条证据非常关键：
+
+- **真实训练 checkpoint 会改变 held-out eval 样本的解码文本。**
+- 因而“模型完全没训练起来，所以 eval 才是一条死线”这一解释已经明显站不住。
+
+### 2. 运行时 eval 日志里的相同 held-out 样本却始终不变
+
+训练日志里，多次打印了 eval 阶段的首个样本文本。对于上面同一道“two roads / farmland 551”题，`step 5 / 20 / 65` 的日志内容完全一致：
+
+- `rft_logs/lightrft-ursa8b-stage3-psgrpo/node0_20260325_114828.log:8551`
+- `rft_logs/lightrft-ursa8b-stage3-psgrpo/node0_20260325_114828.log:9664`
+- `rft_logs/lightrft-ursa8b-stage3-psgrpo/node0_20260325_114828.log:22079`
+
+这说明：
+
+- **训练过程中 runtime eval 实际打印出来的生成文本没有变。**
+- 但离线从 `global_step40/60` checkpoint 直接解码，同一 held-out prompt 的输出已经变了。
+
+两条证据合起来，已经足以说明问题不在“checkpoint 本身是否变化”，而在“runtime eval 当时吃到的到底是不是当前 actor 权重”。
+
+### 3. 直接修改 inference engine，会立刻改变 rollout 输出
+
+对单卡最小化 FSDP + separate rollout probe 做了一个强制扰动：
+
+- 直接把 `strategy.inference_engine` 持有的 `lm_head` 清零
+
+结果见：
+
+- `tmp/ursa_stage3/probe_separate_rollout_generation_change_inference_zero.log`
+
+关键结果：
+
+- `tokens_changed: true`
+- 生成文本从正常回答变成了明显损坏的 `!!!!...`
+
+对应位置：
+
+- `tmp/ursa_stage3/probe_separate_rollout_generation_change_inference_zero.log:1799`
+- `tmp/ursa_stage3/probe_separate_rollout_generation_change_inference_zero.log:1809`
+
+这证明：
+
+- **rollout / eval 使用的 inference engine 对象本身是活的。**
+- **它当前的参数如果被直接改坏，生成输出会立刻跟着变。**
+
+### 4. 直接修改 FSDP actor，本体直接生成也会立刻变化
+
+我又验证了另一件事：
+
+- 对 FSDP actor 本身的 `DTensor` 参数做 `all_zero`
+- 不走 rollout engine，直接调用 actor 自己的 `generate`
+
+结果见：
+
+- `tmp/ursa_stage3/probe_actor_direct_generation_after_zero.log`
+
+关键结果：
+
+- `tokens_changed: true`
+- 输出从正常文本变成 `!!!!!!!!!!!!!!!!...`
+
+对应位置：
+
+- `tmp/ursa_stage3/probe_actor_direct_generation_after_zero.log:1009`
+- `tmp/ursa_stage3/probe_actor_direct_generation_after_zero.log:1012`
+
+这证明：
+
+- **我对 actor 做的“清零”扰动本身是有效的。**
+- **FSDP actor 当前持有的参数确实会影响它自己的直接生成。**
+
+### 5. 但通过 `update_engine_weights(actor)` 同步过去，rollout 输出却不变
+
+随后做了最关键的最小化同步 probe：
+
+- 对 FSDP actor 做 `all_zero`
+- 调用 `strategy.update_engine_weights(actor)`
+- 再用 separate rollout actor 走 `gather_and_generate`
+
+结果见：
+
+- `tmp/ursa_stage3/probe_separate_rollout_generation_change_actor_all_zero.log`
+
+关键结果：
+
+- `tokens_changed: false`
+- `copy_state_s` 仍然耗时约 `35s`
+- 前后 rollout 文本完全相同
+
+对应位置：
+
+- `tmp/ursa_stage3/probe_separate_rollout_generation_change_actor_all_zero.log:1795`
+- `tmp/ursa_stage3/probe_separate_rollout_generation_change_actor_all_zero.log:1804`
+- `tmp/ursa_stage3/probe_separate_rollout_generation_change_actor_all_zero.log:1818`
+
+这条证据与前两条放在一起就非常明确：
+
+1. actor 自己变了会影响直接生成；
+2. inference engine 自己变了会影响 rollout 生成；
+3. **但 actor 变了以后，通过 `update_engine_weights(actor)` 同步到 rollout actor，并没有让 rollout 生成发生对应变化。**
+
+这已经是一个最小化可复现的链路问题，不再是“怀疑”。
+
+## 当前最可能的根因位置
+
+当前最可疑的代码位置已经缩到：
+
+- `lightrft/strategy/strategy_base.py:850`
+- `lightrft/strategy/strategy_base.py:877`
+
+也就是：
+
+- `_copy_local_hf_rollout_actor_state(...)`
+- `_sync_separate_hf_rollout_actor(...)`
+
+尤其是 `_copy_local_hf_rollout_actor_state(...)` 的复制逻辑：
+
+- `src_param.detach()`
+- `dst_param.detach().copy_(src_tensor)`
+
+对应代码：
+
+- `lightrft/strategy/strategy_base.py:857`
+- `lightrft/strategy/strategy_base.py:861`
+
+结合上面的最小化复现，当前最合理的解释是：
+
+- 在 FSDP / `DTensor` 参数场景下，这里的参数复制**没有把 actor 的当前有效权重正确同步到 separate rollout actor**。
+- 因此日志里的
+  - `Finished update engine weights for separate local HF rollout actor`
+  - `copy_state_s=...`
+  只能证明“执行了复制流程”，**不能证明复制语义真的成功了**。
+
+## 现在的诊断结论
+
+基于本轮新增证据，当前结论已经可以明确写成：
+
+1. **训练权重确实在变化。**
+   - checkpoint 文件哈希变化；
+   - 离线从 `global_step40/60` 解码，held-out 样本输出明显变化。
+2. **runtime eval 的生成结果却保持不变。**
+   - 本地日志里同一道 held-out 题的 eval 输出跨多个 step 完全相同。
+3. **问题点已经最小化复现到 `update_engine_weights(actor)` 这条同步链。**
+   - 直接改 actor，会影响 actor 自己的直接生成；
+   - 直接改 inference engine，会影响 rollout 生成；
+   - 但 actor 改完后通过 `update_engine_weights(actor)` 同步，rollout 输出不跟着变。
+
+因此，当前最强结论不是：
+
+- “模型没训练”
+
+而是：
+
+- **separate local HF rollout actor 的权重同步链有问题，导致 runtime eval 基本吃的是 stale rollout 权重。**
+
+## 还差什么
+
+虽然主结论已经足够明确，但如果后续要继续把证据再补满，剩下两项仍可做：
+
+1. 在 8 卡 `torchrun` 拓扑下复跑同样的最小化同步 probe，确认该问题在真实训练拓扑下同样复现。
+2. 进一步把 `_copy_local_hf_rollout_actor_state(...)` 拆成“逐参数 local shard checksum”验证，精确确认到底是：
+   - `DTensor.copy_` 本身语义不对；
+   - 还是 source / destination 参数视图不是当前 forward 真正使用的那份存储。
+
+但这两项已经属于“进一步加固证据”，不是当前诊断成立所必需的前提。
+
 ## 与“模型是否真的在训练”相关的证据
 
 ### 1. checkpoint 保存配置是明确开启的
