@@ -1183,11 +1183,11 @@ if self._uses_separate_hf_rollout_actor():
 
 ### 13.3 修复后验证
 
-- [ ] 修复后重新跑最小化 probe，验证“改 actor 后 sync，rollout 输出会跟着变化”。
-- [ ] 修复后专门验证 `keep_on_gpu=True` 下“不做手工 refresh 也会立即反映新权重”。
+- [x] 修复后重新跑最小化 probe，验证“改 actor 后 sync，rollout 输出会跟着变化”。
+- [x] 修复后专门验证 `keep_on_gpu=True` 下“不做手工 refresh 也会立即反映新权重”。
 - [ ] 修复后重新跑离线 held-out 对比，确认 runtime eval 的首样本文本会与对应 checkpoint decode 一致或至少同步变化。
 - [ ] 修复后做一个极短训练 smoke run，确认 eval 指标不再是严格常数。
-- [ ] 修复后检查 `copy_state_s`、显存占用、生成耗时，确认修复没有把同步成本推到不可接受的程度。
+- [x] 修复后检查 `copy_state_s`、显存占用、生成耗时，确认没有把同步成本推到不可接受的程度。
 - [ ] 修复后保留一轮带 debug 日志的 run，确认线上链路证据闭环，然后再把额外 debug 日志关掉。
 
 ---
@@ -1204,22 +1204,132 @@ if self._uses_separate_hf_rollout_actor():
 
 ### 14.1 本轮执行 Checklist
 
-* [ ] 先在文档里固定这轮修复目标、假设和验收标准，避免边改边漂移。
-* [ ] 在 `strategy_base.py` 的 `keep_on_gpu=True` 分支里落最小修复，优先只补显式 `reload_model(self.inference_engine)`，不同时重写 `DTensor.copy_` 语义。
-* [ ] 跑单卡最小 probe，确认 `keep_on_gpu=True` 下即使不手工 refresh，`update_engine_weights(actor)` 之后 rollout 输出也会立刻变化。
-* [ ] 跑真实 8 卡最小 probe，确认多卡拓扑下也同样不需要额外手工 refresh。
-* [ ] 跑 `keep_on_gpu=False` 对照组，确认原本就正常的 offload / wakeup 路径没有被这次修复打坏。
-* [ ] 检查修复前后 `sync_stats`、显存和耗时，确认没有引入明显异常。
-* [ ] 如有必要，补最小 debug 日志，确认 runtime eval 主链确实已经走到修复后的路径。
-* [ ] 把修复结果、日志片段、是否验通、是否发现副作用全部补回本文档。
-* [ ] 最终提交并 push 修复代码和更新后的排查记录。
+* [x] 先在文档里固定这轮修复目标、假设和验收标准，避免边改边漂移。
+* [x] 在 `strategy_base.py` 的 `keep_on_gpu=True` 分支里落最小修复，优先只补显式 `reload_model(self.inference_engine)`，不同时重写 `DTensor.copy_` 语义。
+* [x] 跑单卡最小 probe，确认 `keep_on_gpu=True` 下即使不手工 refresh，`update_engine_weights(actor)` 之后 rollout 输出也会立刻变化。
+* [x] 跑真实 8 卡最小 probe，确认多卡拓扑下也同样不需要额外手工 refresh。
+* [x] 跑 `keep_on_gpu=False` 对照组，确认原本就正常的 offload / wakeup 路径没有被这次修复打坏。
+* [x] 检查修复前后 `sync_stats`、显存和耗时，确认没有引入明显异常。
+* [x] 本轮没有额外补 runtime eval 主链日志；现有最小 probe 已直接覆盖 `update_engine_weights -> gather_and_generate -> engine_generate_local` 的关键链路，足以判定修复是否命中。
+* [x] 把修复结果、日志片段、是否验通、是否发现副作用全部补回本文档。
+* [x] 最终提交并 push 修复代码和更新后的排查记录。
 
 ### 14.2 本轮验收标准
 
 本轮只有同时满足下面几条，才算“修通”：
 
-* [ ] `keep_on_gpu=True` 下，`update_engine_weights(actor)` 后不再需要手工 `reload_only` / `offload_reload`，固定样本输出会直接变化。
-* [ ] 单独把状态切成 `SLEEPED` 仍然不是必要条件，说明修复点确实命中 materialize 本身，而不是偶然绕路。
-* [ ] 真实 8 卡 `torchrun` 下复现同样结论，不是单卡偶然现象。
-* [ ] `keep_on_gpu=False` 路径仍然保持原行为，没有功能回退。
-* [ ] Python 语法、最小 probe、目标链路验证都通过，没有新的明显报错或 OOM。
+* [x] `keep_on_gpu=True` 下，`update_engine_weights(actor)` 后不再需要手工 `reload_only` / `offload_reload`，固定样本输出会直接变化。
+* [x] 单独把状态切成 `SLEEPED` 仍然不是必要条件，说明修复点确实命中 materialize 本身，而不是偶然绕路。
+* [x] 真实 8 卡 `torchrun` 下复现同样结论，不是单卡偶然现象。
+* [x] `keep_on_gpu=False` 路径仍然保持原行为，没有功能回退。
+* [x] Python 语法、最小 probe、目标链路验证都通过，没有新的明显报错或 OOM。
+
+### 14.3 本轮修复结果
+
+这轮修复真正改动的点很小，但命中了问题本体：
+
+- 在 `keep_on_gpu=True` 的 separate local HF rollout actor 同步路径里，原来只做 `copy -> synchronize/barrier -> WAKEUP`；
+- 现在改成 `copy -> reload_model(self.inference_engine) -> prepare -> synchronize/barrier -> WAKEUP`；
+- 这条修改直接对应了之前 probe 证明过的最小必要动作。
+
+问题点现在也可以写得更具体：
+
+- 出问题的位置不是 `cached src_param`，也不是训练 actor 没更新；
+- 真正的问题在于 `keep_on_gpu=True` 时，`_sync_separate_hf_rollout_actor(...)` 复制完状态后没有显式 rematerialize rollout actor；
+- 而 `wakeup_inference_engine()` 在 `keep_on_gpu=True` 分支又会直接早退，不会替你补这次 reload；
+- 所以旧的 GPU-resident rollout 权重会继续被 generate 复用，导致 eval 长时间看起来完全不动。
+
+修复后的单卡 `keep_on_gpu=True` 最小 probe 结果如下：
+
+```json
+{
+  "refresh_mode": "none",
+  "tokens_changed": true,
+  "lm_head_post_update": "4fe7b59af6de3b66",
+  "lm_head_post_refresh": "4fe7b59af6de3b66",
+  "before_text": "Step 1: Observe the image. The image shows a landscape with a plane flying in the sky and another plane on the ground.\n\nStep 2: Analyze the landscape. The ground appears to be mostly flat, with some variations in elevation.\n\nStep 3: Determine if the landscape is flat. Based<|im_end|>",
+  "after_text": "!!!!\"!!!#!!!$!!!%!!!&!!!'!!!(!!!)!!!*!!!+!!!,!!!-!!!.!!!/!!!0!!<|im_end|>",
+  "sync_stats": {
+    "total_s": 0.4604,
+    "keep_on_gpu": true,
+    "actor_offloaded": false,
+    "rollout_offloaded": false,
+    "rollout_reloaded": true,
+    "offload_actor_s": 0.0,
+    "offload_rollout_s": 0.0,
+    "copy_state_s": 0.3212,
+    "reload_rollout_s": 0.1292,
+    "prepare_s": 0.0094,
+    "sync_clear_s": 0.0007
+  }
+}
+```
+
+这条结果说明：
+
+- 修复后即使 `refresh_mode = "none"`，输出也已经直接变化；
+- `lm_head_post_update` 和 `lm_head_post_refresh` 都是新 hash，说明不再依赖额外手工 refresh；
+- 新增的 `rollout_reloaded = true` / `reload_rollout_s = 0.1292` 也表明这次 materialize 已经在同步链路内完成。
+
+修复后的真实 8 卡 `torchrun` probe 结果如下：
+
+```json
+{
+  "refresh_mode": "none",
+  "tokens_changed": true,
+  "lm_head_post_update": "4fe7b59af6de3b66",
+  "lm_head_post_refresh": "4fe7b59af6de3b66",
+  "before_text": "Step 1: Observe the image. The image shows a landscape with a plane flying in the sky and another plane on the ground.\n\nStep 2: Analyze the landscape. The ground appears to be mostly flat, with some variations in elevation.\n\nStep 3: Determine if the landscape is flat. Based<|im_end|>",
+  "after_text": "!!!!\"!!!#!!!$!!!%!!!&!!!'!!!(!!!)!!!*!!!+!!!,!!!-!!!.!!!/!!!0!!<|im_end|>",
+  "sync_stats": {
+    "total_s": 0.4792,
+    "keep_on_gpu": true,
+    "actor_offloaded": false,
+    "rollout_offloaded": false,
+    "rollout_reloaded": true,
+    "offload_actor_s": 0.0,
+    "offload_rollout_s": 0.0,
+    "copy_state_s": 0.3358,
+    "reload_rollout_s": 0.1344,
+    "prepare_s": 0.0081,
+    "sync_clear_s": 0.0009
+  }
+}
+```
+
+这条结果说明：
+
+- 修复不只是单卡偶然现象；
+- 真实 8 卡训练拓扑下，`keep_on_gpu=True` 现在也不需要额外 `reload_only` / `offload_reload`；
+- materialize 语义已经被真正补进主同步路径。
+
+`keep_on_gpu=False` 的单卡回归对照结果如下：
+
+```json
+{
+  "keep_rollout_on_gpu": false,
+  "lm_head_baseline": "23f00ebb3d91b639",
+  "lm_head_post_sync": "4fe7b59af6de3b66",
+  "before_text": "Step 1: Observe the image. The image shows a landscape with a plane flying in the sky and another plane on the ground.\n\nStep 2: Analyze the landscape. The ground appears to be mostly flat, with some variations in elevation.\n\nStep 3: Determine if the landscape is flat. Based<|im_end|>",
+  "after_text": "!!!!\"!!!#!!!$!!!%!!!&!!!'!!!(!!!)!!!*!!!+!!!,!!!-!!!.!!!/!!!0!!<|im_end|>",
+  "sync_stats": {
+    "total_s": 31.2658,
+    "keep_on_gpu": false,
+    "actor_offloaded": true,
+    "rollout_offloaded": false,
+    "rollout_reloaded": false,
+    "offload_actor_s": 20.981,
+    "offload_rollout_s": 0.0,
+    "copy_state_s": 10.2742,
+    "reload_rollout_s": 0.0,
+    "prepare_s": 0.0101,
+    "sync_clear_s": 0.0005
+  }
+}
+```
+
+这条对照组说明：
+
+- 原本正常的 offload / wakeup 路径没有被这次修复打坏；
+- `keep_on_gpu=False` 仍然维持原先行为，没有额外 reload，也没有功能回退；
+- 所以这次补丁目前看是一个比较干净的定点修复，而不是通过扰动其他路径侥幸“修好”。
