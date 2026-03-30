@@ -1189,3 +1189,37 @@ if self._uses_separate_hf_rollout_actor():
 - [ ] 修复后做一个极短训练 smoke run，确认 eval 指标不再是严格常数。
 - [ ] 修复后检查 `copy_state_s`、显存占用、生成耗时，确认修复没有把同步成本推到不可接受的程度。
 - [ ] 修复后保留一轮带 debug 日志的 run，确认线上链路证据闭环，然后再把额外 debug 日志关掉。
+
+---
+
+## 十四、本轮修复计划
+
+这轮不再继续只做诊断，而是按“最小修复 + 定向验收 + 回归对照”的顺序推进。
+
+当前准备先落的最小修复是：
+
+- 在 `hf_separate_rollout_keep_on_gpu=True` 的 separate local HF rollout actor 同步路径里，不再只做 `torch.cuda.synchronize()` + `barrier()`；
+- 在 `_copy_local_hf_rollout_actor_state(actor, self.inference_engine)` 之后，显式执行 `reload_model(self.inference_engine)`，让 rollout generate 真正 materialize 到最新权重；
+- 不采用“只把 `self.inference_engine_status` 设回 `SLEEPED`”的方案，因为 probe 已经证明这一步单独无效。
+
+### 14.1 本轮执行 Checklist
+
+* [ ] 先在文档里固定这轮修复目标、假设和验收标准，避免边改边漂移。
+* [ ] 在 `strategy_base.py` 的 `keep_on_gpu=True` 分支里落最小修复，优先只补显式 `reload_model(self.inference_engine)`，不同时重写 `DTensor.copy_` 语义。
+* [ ] 跑单卡最小 probe，确认 `keep_on_gpu=True` 下即使不手工 refresh，`update_engine_weights(actor)` 之后 rollout 输出也会立刻变化。
+* [ ] 跑真实 8 卡最小 probe，确认多卡拓扑下也同样不需要额外手工 refresh。
+* [ ] 跑 `keep_on_gpu=False` 对照组，确认原本就正常的 offload / wakeup 路径没有被这次修复打坏。
+* [ ] 检查修复前后 `sync_stats`、显存和耗时，确认没有引入明显异常。
+* [ ] 如有必要，补最小 debug 日志，确认 runtime eval 主链确实已经走到修复后的路径。
+* [ ] 把修复结果、日志片段、是否验通、是否发现副作用全部补回本文档。
+* [ ] 最终提交并 push 修复代码和更新后的排查记录。
+
+### 14.2 本轮验收标准
+
+本轮只有同时满足下面几条，才算“修通”：
+
+* [ ] `keep_on_gpu=True` 下，`update_engine_weights(actor)` 后不再需要手工 `reload_only` / `offload_reload`，固定样本输出会直接变化。
+* [ ] 单独把状态切成 `SLEEPED` 仍然不是必要条件，说明修复点确实命中 materialize 本身，而不是偶然绕路。
+* [ ] 真实 8 卡 `torchrun` 下复现同样结论，不是单卡偶然现象。
+* [ ] `keep_on_gpu=False` 路径仍然保持原行为，没有功能回退。
+* [ ] Python 语法、最小 probe、目标链路验证都通过，没有新的明显报错或 OOM。
