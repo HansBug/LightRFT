@@ -168,6 +168,7 @@ EVAL_NO_REPEAT_NGRAM_SIZE="${EVAL_NO_REPEAT_NGRAM_SIZE:-0}"
 USE_URSA_ENGINE_WRAPPER="${USE_URSA_ENGINE_WRAPPER:-1}"
 URSA_ENGINE_CHECKPOINT_DIR="${URSA_ENGINE_CHECKPOINT_DIR:-/data/LightRFT/tmp/ursa_stage3/URSA-8B-engine-ready}"
 SYSTEM_PROMPT="${SYSTEM_PROMPT:-A conversation between the User and Assistant. The User asks a question that may require mathematical or visual reasoning, and the Assistant solves it step by step. Each step MUST begin with \"Step N:\" (e.g. \"Step 1:\", \"Step 2:\") on its own line. After all steps, output exactly one final answer line prefixed with \"†Answer:\" (e.g. \"†Answer: 42\"). Stop immediately after the \"†Answer:\" line and do not output any extra text, repeated answer markers, or additional steps.}"
+ENABLE_PROFILE="${ENABLE_PROFILE:-0}"
 
 
 ################################################################################
@@ -367,6 +368,14 @@ if [[ "${ENGINE_TYPE}" == "hf" && "${HF_SEPARATE_ROLLOUT_ACTOR}" == "1" ]]; then
     echo "[run_grpo_math_prm_ursa_8b.sh] Separate local HF rollout actor enabled."
 fi
 
+PROFILE_ARGS=()
+if [[ "${ENABLE_PROFILE}" == "1" ]]; then
+    PROFILE_ARGS=(
+        --enable_profile
+    )
+    echo "[run_grpo_math_prm_ursa_8b.sh] Step profiling enabled."
+fi
+
 EVAL_ARGS=()
 if [[ "${EVAL_MAX_SAMPLES}" -gt 0 ]]; then
     EVAL_ARGS=(
@@ -424,7 +433,7 @@ set -x
 #                         Part 5: Main Training Command                        #
 ################################################################################
 
-torchrun \
+python -m torch.distributed.run \
     --nnodes $NNODES \
     --nproc-per-node $GPUS_PER_NODE \
     --node_rank $NODE_RANK \
@@ -486,6 +495,7 @@ torchrun \
     --adam_offload \
     --limit_mm_image_per_prompt $limit_mm_image_per_prompt \
     "${EVAL_ARGS[@]}" \
+    "${PROFILE_ARGS[@]}" \
     "${WANDB_ARGS[@]}" \
     2>&1 | tee "rft_logs/${EXPERIMENT_NAME}/node${NODE_RANK}_${current_time}.log"
 
