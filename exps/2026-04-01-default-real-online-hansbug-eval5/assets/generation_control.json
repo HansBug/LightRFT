@@ -1,0 +1,1057 @@
+{
+  "sanitize": [
+    {
+      "ts": "StrategyINFO 03-31 00:20:27",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 359.4,
+      "max_trim_tokens": 455.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 00:42:42",
+      "count": 125,
+      "total": 128,
+      "ratio": 0.9765625,
+      "mean_trim_tokens": 342.2,
+      "max_trim_tokens": 480.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 01:06:11",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 362.6,
+      "max_trim_tokens": 460.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 01:29:28",
+      "count": 126,
+      "total": 128,
+      "ratio": 0.984375,
+      "mean_trim_tokens": 336.4,
+      "max_trim_tokens": 480.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 01:49:59",
+      "count": 126,
+      "total": 128,
+      "ratio": 0.984375,
+      "mean_trim_tokens": 315.4,
+      "max_trim_tokens": 485.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 02:22:49",
+      "count": 125,
+      "total": 128,
+      "ratio": 0.9765625,
+      "mean_trim_tokens": 333.7,
+      "max_trim_tokens": 484.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 02:43:16",
+      "count": 126,
+      "total": 128,
+      "ratio": 0.984375,
+      "mean_trim_tokens": 330.4,
+      "max_trim_tokens": 482.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 03:04:31",
+      "count": 125,
+      "total": 128,
+      "ratio": 0.9765625,
+      "mean_trim_tokens": 337.7,
+      "max_trim_tokens": 489.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 03:25:34",
+      "count": 121,
+      "total": 128,
+      "ratio": 0.9453125,
+      "mean_trim_tokens": 326.8,
+      "max_trim_tokens": 465.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 03:45:52",
+      "count": 116,
+      "total": 128,
+      "ratio": 0.90625,
+      "mean_trim_tokens": 278.9,
+      "max_trim_tokens": 494.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 04:17:06",
+      "count": 123,
+      "total": 128,
+      "ratio": 0.9609375,
+      "mean_trim_tokens": 346.3,
+      "max_trim_tokens": 484.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 04:37:40",
+      "count": 126,
+      "total": 128,
+      "ratio": 0.984375,
+      "mean_trim_tokens": 320.6,
+      "max_trim_tokens": 463.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 04:58:45",
+      "count": 121,
+      "total": 128,
+      "ratio": 0.9453125,
+      "mean_trim_tokens": 346.9,
+      "max_trim_tokens": 481.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 05:18:41",
+      "count": 124,
+      "total": 128,
+      "ratio": 0.96875,
+      "mean_trim_tokens": 300.4,
+      "max_trim_tokens": 488.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 05:39:29",
+      "count": 121,
+      "total": 128,
+      "ratio": 0.9453125,
+      "mean_trim_tokens": 328.7,
+      "max_trim_tokens": 452.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 06:12:50",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 387.2,
+      "max_trim_tokens": 481.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 06:36:09",
+      "count": 125,
+      "total": 128,
+      "ratio": 0.9765625,
+      "mean_trim_tokens": 340.2,
+      "max_trim_tokens": 487.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 06:57:56",
+      "count": 128,
+      "total": 128,
+      "ratio": 1.0,
+      "mean_trim_tokens": 370.3,
+      "max_trim_tokens": 472.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 07:20:37",
+      "count": 122,
+      "total": 128,
+      "ratio": 0.953125,
+      "mean_trim_tokens": 307.3,
+      "max_trim_tokens": 463.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 07:44:30",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 359.2,
+      "max_trim_tokens": 467.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 08:18:14",
+      "count": 124,
+      "total": 128,
+      "ratio": 0.96875,
+      "mean_trim_tokens": 309.3,
+      "max_trim_tokens": 472.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 08:40:08",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 346.7,
+      "max_trim_tokens": 482.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 09:01:29",
+      "count": 120,
+      "total": 128,
+      "ratio": 0.9375,
+      "mean_trim_tokens": 285.2,
+      "max_trim_tokens": 485.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 09:22:09",
+      "count": 125,
+      "total": 128,
+      "ratio": 0.9765625,
+      "mean_trim_tokens": 310.6,
+      "max_trim_tokens": 480.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 09:44:25",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 356.7,
+      "max_trim_tokens": 464.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 10:15:39",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 342.8,
+      "max_trim_tokens": 463.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 10:38:26",
+      "count": 123,
+      "total": 128,
+      "ratio": 0.9609375,
+      "mean_trim_tokens": 330.3,
+      "max_trim_tokens": 491.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 11:00:40",
+      "count": 122,
+      "total": 128,
+      "ratio": 0.953125,
+      "mean_trim_tokens": 320.3,
+      "max_trim_tokens": 464.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 11:21:29",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 352.2,
+      "max_trim_tokens": 483.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 11:43:30",
+      "count": 122,
+      "total": 128,
+      "ratio": 0.953125,
+      "mean_trim_tokens": 323.6,
+      "max_trim_tokens": 486.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 12:13:47",
+      "count": 128,
+      "total": 128,
+      "ratio": 1.0,
+      "mean_trim_tokens": 377.0,
+      "max_trim_tokens": 466.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 12:33:41",
+      "count": 125,
+      "total": 128,
+      "ratio": 0.9765625,
+      "mean_trim_tokens": 347.5,
+      "max_trim_tokens": 489.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 12:55:33",
+      "count": 122,
+      "total": 128,
+      "ratio": 0.953125,
+      "mean_trim_tokens": 307.9,
+      "max_trim_tokens": 475.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 13:16:58",
+      "count": 123,
+      "total": 128,
+      "ratio": 0.9609375,
+      "mean_trim_tokens": 328.2,
+      "max_trim_tokens": 471.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 13:39:30",
+      "count": 123,
+      "total": 128,
+      "ratio": 0.9609375,
+      "mean_trim_tokens": 343.0,
+      "max_trim_tokens": 489.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 14:10:27",
+      "count": 126,
+      "total": 128,
+      "ratio": 0.984375,
+      "mean_trim_tokens": 350.7,
+      "max_trim_tokens": 471.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 14:32:38",
+      "count": 121,
+      "total": 128,
+      "ratio": 0.9453125,
+      "mean_trim_tokens": 299.3,
+      "max_trim_tokens": 491.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 14:51:30",
+      "count": 128,
+      "total": 128,
+      "ratio": 1.0,
+      "mean_trim_tokens": 368.2,
+      "max_trim_tokens": 497.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 15:12:41",
+      "count": 125,
+      "total": 128,
+      "ratio": 0.9765625,
+      "mean_trim_tokens": 332.7,
+      "max_trim_tokens": 484.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 15:32:47",
+      "count": 120,
+      "total": 128,
+      "ratio": 0.9375,
+      "mean_trim_tokens": 331.0,
+      "max_trim_tokens": 463.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 16:05:41",
+      "count": 128,
+      "total": 128,
+      "ratio": 1.0,
+      "mean_trim_tokens": 343.4,
+      "max_trim_tokens": 460.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 16:24:47",
+      "count": 118,
+      "total": 128,
+      "ratio": 0.921875,
+      "mean_trim_tokens": 308.7,
+      "max_trim_tokens": 495.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 16:47:10",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 335.6,
+      "max_trim_tokens": 464.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 17:10:14",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 366.0,
+      "max_trim_tokens": 491.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 17:31:19",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 366.4,
+      "max_trim_tokens": 460.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 18:04:38",
+      "count": 124,
+      "total": 128,
+      "ratio": 0.96875,
+      "mean_trim_tokens": 325.8,
+      "max_trim_tokens": 483.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 18:23:47",
+      "count": 125,
+      "total": 128,
+      "ratio": 0.9765625,
+      "mean_trim_tokens": 323.9,
+      "max_trim_tokens": 471.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 18:44:00",
+      "count": 119,
+      "total": 128,
+      "ratio": 0.9296875,
+      "mean_trim_tokens": 308.1,
+      "max_trim_tokens": 466.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 19:04:58",
+      "count": 123,
+      "total": 128,
+      "ratio": 0.9609375,
+      "mean_trim_tokens": 322.4,
+      "max_trim_tokens": 454.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 19:28:44",
+      "count": 119,
+      "total": 128,
+      "ratio": 0.9296875,
+      "mean_trim_tokens": 329.9,
+      "max_trim_tokens": 482.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 20:02:37",
+      "count": 128,
+      "total": 128,
+      "ratio": 1.0,
+      "mean_trim_tokens": 365.8,
+      "max_trim_tokens": 457.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 20:23:33",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 327.0,
+      "max_trim_tokens": 487.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 20:43:51",
+      "count": 126,
+      "total": 128,
+      "ratio": 0.984375,
+      "mean_trim_tokens": 353.9,
+      "max_trim_tokens": 491.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 21:08:37",
+      "count": 122,
+      "total": 128,
+      "ratio": 0.953125,
+      "mean_trim_tokens": 335.5,
+      "max_trim_tokens": 461.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 21:28:48",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 352.5,
+      "max_trim_tokens": 465.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 21:59:58",
+      "count": 123,
+      "total": 128,
+      "ratio": 0.9609375,
+      "mean_trim_tokens": 328.7,
+      "max_trim_tokens": 500.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 22:20:40",
+      "count": 126,
+      "total": 128,
+      "ratio": 0.984375,
+      "mean_trim_tokens": 335.6,
+      "max_trim_tokens": 462.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 22:42:25",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 354.2,
+      "max_trim_tokens": 489.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 23:03:59",
+      "count": 128,
+      "total": 128,
+      "ratio": 1.0,
+      "mean_trim_tokens": 377.9,
+      "max_trim_tokens": 477.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 23:25:58",
+      "count": 125,
+      "total": 128,
+      "ratio": 0.9765625,
+      "mean_trim_tokens": 350.7,
+      "max_trim_tokens": 471.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 23:59:21",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 354.5,
+      "max_trim_tokens": 483.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 00:19:13",
+      "count": 125,
+      "total": 128,
+      "ratio": 0.9765625,
+      "mean_trim_tokens": 310.9,
+      "max_trim_tokens": 464.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 00:41:13",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 349.7,
+      "max_trim_tokens": 495.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 01:02:24",
+      "count": 128,
+      "total": 128,
+      "ratio": 1.0,
+      "mean_trim_tokens": 371.2,
+      "max_trim_tokens": 484.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 01:24:15",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 394.1,
+      "max_trim_tokens": 474.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 01:56:26",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 336.9,
+      "max_trim_tokens": 496.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 02:16:43",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 340.6,
+      "max_trim_tokens": 467.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 02:37:36",
+      "count": 120,
+      "total": 128,
+      "ratio": 0.9375,
+      "mean_trim_tokens": 350.6,
+      "max_trim_tokens": 485.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 03:00:15",
+      "count": 128,
+      "total": 128,
+      "ratio": 1.0,
+      "mean_trim_tokens": 317.4,
+      "max_trim_tokens": 495.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 03:21:51",
+      "count": 128,
+      "total": 128,
+      "ratio": 1.0,
+      "mean_trim_tokens": 350.1,
+      "max_trim_tokens": 467.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 03:56:07",
+      "count": 125,
+      "total": 128,
+      "ratio": 0.9765625,
+      "mean_trim_tokens": 292.5,
+      "max_trim_tokens": 484.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 04:18:55",
+      "count": 124,
+      "total": 128,
+      "ratio": 0.96875,
+      "mean_trim_tokens": 305.8,
+      "max_trim_tokens": 484.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 04:43:03",
+      "count": 125,
+      "total": 128,
+      "ratio": 0.9765625,
+      "mean_trim_tokens": 340.0,
+      "max_trim_tokens": 495.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 05:07:14",
+      "count": 123,
+      "total": 128,
+      "ratio": 0.9609375,
+      "mean_trim_tokens": 329.9,
+      "max_trim_tokens": 467.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 05:26:33",
+      "count": 125,
+      "total": 128,
+      "ratio": 0.9765625,
+      "mean_trim_tokens": 337.9,
+      "max_trim_tokens": 479.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 06:03:19",
+      "count": 123,
+      "total": 128,
+      "ratio": 0.9609375,
+      "mean_trim_tokens": 323.8,
+      "max_trim_tokens": 477.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 06:26:01",
+      "count": 125,
+      "total": 128,
+      "ratio": 0.9765625,
+      "mean_trim_tokens": 365.5,
+      "max_trim_tokens": 471.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 06:45:58",
+      "count": 126,
+      "total": 128,
+      "ratio": 0.984375,
+      "mean_trim_tokens": 372.3,
+      "max_trim_tokens": 482.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 07:07:13",
+      "count": 120,
+      "total": 128,
+      "ratio": 0.9375,
+      "mean_trim_tokens": 321.0,
+      "max_trim_tokens": 481.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 07:27:53",
+      "count": 120,
+      "total": 128,
+      "ratio": 0.9375,
+      "mean_trim_tokens": 319.1,
+      "max_trim_tokens": 492.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 07:57:59",
+      "count": 128,
+      "total": 128,
+      "ratio": 1.0,
+      "mean_trim_tokens": 362.0,
+      "max_trim_tokens": 471.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 08:16:56",
+      "count": 124,
+      "total": 128,
+      "ratio": 0.96875,
+      "mean_trim_tokens": 350.8,
+      "max_trim_tokens": 463.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 08:37:13",
+      "count": 128,
+      "total": 128,
+      "ratio": 1.0,
+      "mean_trim_tokens": 375.5,
+      "max_trim_tokens": 487.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 09:00:12",
+      "count": 123,
+      "total": 128,
+      "ratio": 0.9609375,
+      "mean_trim_tokens": 294.7,
+      "max_trim_tokens": 483.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 09:20:04",
+      "count": 126,
+      "total": 128,
+      "ratio": 0.984375,
+      "mean_trim_tokens": 347.4,
+      "max_trim_tokens": 472.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 09:49:27",
+      "count": 123,
+      "total": 128,
+      "ratio": 0.9609375,
+      "mean_trim_tokens": 342.7,
+      "max_trim_tokens": 463.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 10:09:08",
+      "count": 128,
+      "total": 128,
+      "ratio": 1.0,
+      "mean_trim_tokens": 338.7,
+      "max_trim_tokens": 464.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 10:29:39",
+      "count": 122,
+      "total": 128,
+      "ratio": 0.953125,
+      "mean_trim_tokens": 335.1,
+      "max_trim_tokens": 473.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 10:49:27",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 335.3,
+      "max_trim_tokens": 467.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 11:09:06",
+      "count": 128,
+      "total": 128,
+      "ratio": 1.0,
+      "mean_trim_tokens": 335.4,
+      "max_trim_tokens": 472.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 11:39:13",
+      "count": 113,
+      "total": 128,
+      "ratio": 0.8828125,
+      "mean_trim_tokens": 274.1,
+      "max_trim_tokens": 481.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 11:58:22",
+      "count": 126,
+      "total": 128,
+      "ratio": 0.984375,
+      "mean_trim_tokens": 336.1,
+      "max_trim_tokens": 467.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 12:17:44",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 324.4,
+      "max_trim_tokens": 462.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 12:37:36",
+      "count": 124,
+      "total": 128,
+      "ratio": 0.96875,
+      "mean_trim_tokens": 340.2,
+      "max_trim_tokens": 494.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 13:01:05",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 354.1,
+      "max_trim_tokens": 467.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 13:33:01",
+      "count": 126,
+      "total": 128,
+      "ratio": 0.984375,
+      "mean_trim_tokens": 327.2,
+      "max_trim_tokens": 482.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 13:51:45",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 387.9,
+      "max_trim_tokens": 475.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 14:12:05",
+      "count": 125,
+      "total": 128,
+      "ratio": 0.9765625,
+      "mean_trim_tokens": 343.3,
+      "max_trim_tokens": 486.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 14:31:39",
+      "count": 126,
+      "total": 128,
+      "ratio": 0.984375,
+      "mean_trim_tokens": 353.5,
+      "max_trim_tokens": 488.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 14:49:46",
+      "count": 128,
+      "total": 128,
+      "ratio": 1.0,
+      "mean_trim_tokens": 374.0,
+      "max_trim_tokens": 492.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 15:20:47",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 343.6,
+      "max_trim_tokens": 470.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 15:39:42",
+      "count": 126,
+      "total": 128,
+      "ratio": 0.984375,
+      "mean_trim_tokens": 352.6,
+      "max_trim_tokens": 488.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 16:00:06",
+      "count": 126,
+      "total": 128,
+      "ratio": 0.984375,
+      "mean_trim_tokens": 342.7,
+      "max_trim_tokens": 471.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 16:20:20",
+      "count": 128,
+      "total": 128,
+      "ratio": 1.0,
+      "mean_trim_tokens": 333.6,
+      "max_trim_tokens": 473.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 16:39:15",
+      "count": 128,
+      "total": 128,
+      "ratio": 1.0,
+      "mean_trim_tokens": 384.4,
+      "max_trim_tokens": 470.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 17:08:48",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 356.8,
+      "max_trim_tokens": 483.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 17:27:45",
+      "count": 124,
+      "total": 128,
+      "ratio": 0.96875,
+      "mean_trim_tokens": 326.9,
+      "max_trim_tokens": 480.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 17:49:42",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 351.1,
+      "max_trim_tokens": 480.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 18:08:09",
+      "count": 124,
+      "total": 128,
+      "ratio": 0.96875,
+      "mean_trim_tokens": 325.9,
+      "max_trim_tokens": 478.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 18:28:13",
+      "count": 121,
+      "total": 128,
+      "ratio": 0.9453125,
+      "mean_trim_tokens": 314.6,
+      "max_trim_tokens": 479.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 18:57:56",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 344.6,
+      "max_trim_tokens": 478.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 19:18:41",
+      "count": 121,
+      "total": 128,
+      "ratio": 0.9453125,
+      "mean_trim_tokens": 314.2,
+      "max_trim_tokens": 463.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 19:38:47",
+      "count": 127,
+      "total": 128,
+      "ratio": 0.9921875,
+      "mean_trim_tokens": 345.3,
+      "max_trim_tokens": 485.0
+    }
+  ],
+  "generate_length": [
+    {
+      "ts": "StrategyINFO 03-31 00:20:27",
+      "step": 0,
+      "min_length": 474,
+      "max_length": 512,
+      "mean_length": 511.8359375
+    },
+    {
+      "ts": "StrategyINFO 03-31 02:43:16",
+      "step": 10,
+      "min_length": 489,
+      "max_length": 512,
+      "mean_length": 511.90234375
+    },
+    {
+      "ts": "StrategyINFO 03-31 04:58:44",
+      "step": 20,
+      "min_length": 488,
+      "max_length": 512,
+      "mean_length": 511.90234375
+    },
+    {
+      "ts": "StrategyINFO 03-31 07:20:37",
+      "step": 30,
+      "min_length": 488,
+      "max_length": 512,
+      "mean_length": 511.8955078125
+    },
+    {
+      "ts": "StrategyINFO 03-31 09:44:25",
+      "step": 40,
+      "min_length": 440,
+      "max_length": 512,
+      "mean_length": 511.5419921875
+    },
+    {
+      "ts": "StrategyINFO 03-31 11:48:15",
+      "step": 50,
+      "min_length": 505,
+      "max_length": 512,
+      "mean_length": 511.8828125
+    },
+    {
+      "ts": "StrategyINFO 03-31 13:47:25",
+      "step": 60,
+      "min_length": 367,
+      "max_length": 512,
+      "mean_length": 510.859375
+    },
+    {
+      "ts": "StrategyINFO 03-31 15:43:36",
+      "step": 70,
+      "min_length": 512,
+      "max_length": 512,
+      "mean_length": 512.0
+    },
+    {
+      "ts": "StrategyINFO 03-31 17:44:39",
+      "step": 80,
+      "min_length": 511,
+      "max_length": 512,
+      "mean_length": 511.9916666666667
+    },
+    {
+      "ts": "StrategyINFO 03-31 20:02:37",
+      "step": 90,
+      "min_length": 389,
+      "max_length": 512,
+      "mean_length": 511.5361328125
+    },
+    {
+      "ts": "StrategyINFO 03-31 22:20:39",
+      "step": 100,
+      "min_length": 487,
+      "max_length": 512,
+      "mean_length": 511.7734375
+    },
+    {
+      "ts": "StrategyINFO 04-01 00:41:12",
+      "step": 110,
+      "min_length": 417,
+      "max_length": 512,
+      "mean_length": 511.4736328125
+    },
+    {
+      "ts": "StrategyINFO 04-01 03:00:15",
+      "step": 120,
+      "min_length": 473,
+      "max_length": 512,
+      "mean_length": 511.8525390625
+    },
+    {
+      "ts": "StrategyINFO 04-01 05:26:33",
+      "step": 130,
+      "min_length": 457,
+      "max_length": 512,
+      "mean_length": 511.6923828125
+    },
+    {
+      "ts": "StrategyINFO 04-01 07:32:45",
+      "step": 140,
+      "min_length": 384,
+      "max_length": 512,
+      "mean_length": 510.8984375
+    },
+    {
+      "ts": "StrategyINFO 04-01 09:27:11",
+      "step": 150,
+      "min_length": 367,
+      "max_length": 512,
+      "mean_length": 510.015625
+    },
+    {
+      "ts": "StrategyINFO 04-01 11:19:08",
+      "step": 160,
+      "min_length": 511,
+      "max_length": 512,
+      "mean_length": 511.9921875
+    },
+    {
+      "ts": "StrategyINFO 04-01 13:14:26",
+      "step": 170,
+      "min_length": 512,
+      "max_length": 512,
+      "mean_length": 512.0
+    },
+    {
+      "ts": "StrategyINFO 04-01 15:20:46",
+      "step": 180,
+      "min_length": 475,
+      "max_length": 512,
+      "mean_length": 511.5302734375
+    },
+    {
+      "ts": "StrategyINFO 04-01 17:27:45",
+      "step": 190,
+      "min_length": 387,
+      "max_length": 512,
+      "mean_length": 511.0830078125
+    },
+    {
+      "ts": "StrategyINFO 04-01 19:38:47",
+      "step": 200,
+      "min_length": 445,
+      "max_length": 512,
+      "mean_length": 511.4765625
+    }
+  ]
+}

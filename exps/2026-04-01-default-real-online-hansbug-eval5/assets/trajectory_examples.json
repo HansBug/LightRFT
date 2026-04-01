@@ -1,0 +1,242 @@
+[
+  {
+    "tag": "step20",
+    "trajectory_file": "/data/LightRFT/results/default-real-online-hansbug-eval5/default-real-online-hansbug-eval5-ep10-kl0.001-lr1e-6-20260330_235638/trajectories/trajectories_step_20.json",
+    "copied_image": "step20_sample_good.png",
+    "prompt_excerpt": "rt|>system\nA conversation between the User and Assistant. The User asks a question that may require mathematical or visual reasoning, and the Assistant solves it step by step. Each step MUST begin with \"Step N:\" (e.g. \"Step 1:\", \"Step 2:\") on its own line. After all steps, output exactly one final answer line prefixed with \"†Answer:\" (e.g. \"†Answer: 42\"). Stop immediately after the \"†Answer:\" line and do not output any extra text, repeated answer markers, or additional steps.<|im_end|>\n<|im_start|>user\n<|image|> Which label indicates the impermeable layer above the artesian aquifer?<|im_end|>\n",
+    "pure_generated_text": "Step 1: Observe the given image and identify the layers of the aquifer system.  The image shows a cross section of an artesian aquifer system.\n\nStep 2: Locate the impermeable layer. An impermeable layer is one that does not allow water to pass through it.\n\nStep 3: Identify the labels representing the layers. The labels are K, L, and N.  Layer N is the impermeable layer.\n\nStep 4: The question asks which label indicates the impermeable layer above the artesian aquifer.  Label N is the impermeable layer.\n\n†Answer: N",
+    "reward": 0.5,
+    "response_length": 130.0,
+    "advantage": 2.46875,
+    "metrics": {
+      "format_reward": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "accuracy_reward": [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "model_reward": [
+        0.46484375,
+        0.380859375,
+        0.48828125,
+        0.3671875
+      ],
+      "rule_reward": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "outcome_correct": [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "max_relative_drop": [
+        0.3897435963153839,
+        0.608433723449707,
+        0.19209039211273193,
+        0.5746606588363647
+      ],
+      "has_drop_moment": [
+        1.0,
+        1.0,
+        0.0,
+        1.0
+      ],
+      "final_reward": [
+        0.5,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "step_score_min": [
+        0.46484375,
+        0.380859375,
+        0.48828125,
+        0.3671875
+      ],
+      "step_score_mean": [
+        0.734375,
+        0.7734375,
+        0.578125,
+        0.66796875
+      ],
+      "step_score_last": [
+        0.46484375,
+        0.380859375,
+        0.48828125,
+        0.3671875
+      ],
+      "step_count": [
+        4.0,
+        4.0,
+        3.0,
+        10.0
+      ],
+      "answer_tag_present": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "answer_extraction_failed": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "used_answer_fallback": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "reference_supported": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "used_mathruler": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "reference_type_id": [
+        4.0,
+        4.0,
+        4.0,
+        4.0
+      ]
+    }
+  },
+  {
+    "tag": "step100",
+    "trajectory_file": "/data/LightRFT/results/default-real-online-hansbug-eval5/default-real-online-hansbug-eval5-ep10-kl0.001-lr1e-6-20260330_235638/trajectories/trajectories_step_100.json",
+    "copied_image": "step100_sample_bad.png",
+    "prompt_excerpt": " a question that may require mathematical or visual reasoning, and the Assistant solves it step by step. Each step MUST begin with \"Step N:\" (e.g. \"Step 1:\", \"Step 2:\") on its own line. After all steps, output exactly one final answer line prefixed with \"†Answer:\" (e.g. \"†Answer: 42\"). Stop immediately after the \"†Answer:\" line and do not output any extra text, repeated answer markers, or additional steps.<|im_end|>\n<|im_start|>user\n<|image|> Combine the triangles illustrated beneath this statement. The possible outcomes for the number of triangles formed are as follows: 2, 0, or 1.<|im_end|>\n",
+    "pure_generated_text": "Step 1: Observe the given triangle and the line.\nStep 2: Determine the number of intersections between the line and the triangle.  The line does not intersect the triangle.\nStep 3: Count the number of intersections. There are 0 intersections.\n†Answer: 0",
+    "reward": 0.0,
+    "response_length": 60.0,
+    "advantage": -0.353515625,
+    "metrics": {
+      "format_reward": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "accuracy_reward": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "model_reward": [
+        0.96875,
+        0.37109375,
+        0.1572265625,
+        0.99609375
+      ],
+      "rule_reward": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "outcome_correct": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "max_relative_drop": [
+        0.027450980618596077,
+        0.6090534925460815,
+        0.726457417011261,
+        0.0
+      ],
+      "has_drop_moment": [
+        0.0,
+        1.0,
+        1.0,
+        0.0
+      ],
+      "final_reward": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "step_score_min": [
+        0.96875,
+        0.37109375,
+        0.1572265625,
+        0.99609375
+      ],
+      "step_score_mean": [
+        0.98828125,
+        0.8203125,
+        0.55078125,
+        0.99609375
+      ],
+      "step_score_last": [
+        0.96875,
+        0.37109375,
+        0.1572265625,
+        0.99609375
+      ],
+      "step_count": [
+        3.0,
+        4.0,
+        4.0,
+        3.0
+      ],
+      "answer_tag_present": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "answer_extraction_failed": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "used_answer_fallback": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "reference_supported": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "used_mathruler": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "reference_type_id": [
+        2.0,
+        2.0,
+        2.0,
+        2.0
+      ]
+    }
+  }
+]
