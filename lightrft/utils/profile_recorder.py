@@ -68,23 +68,27 @@ class StepProfileRecorder:
         self.last_section_name: Optional[str] = None
         self.last_section_elapsed_s: Optional[float] = None
         self._state_lock = threading.Lock()
+        self._write_lock = threading.Lock()
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread: Optional[threading.Thread] = None
+        self._snapshot_generation = 0
 
-        self.step_profile_path = self.output_dir / "step_profile.rank0.jsonl"
+        self.rank_step_profile_path = self.output_dir / f"step_profile.rank{self.rank}.jsonl"
+        self.rank_latest_profile_path = self.output_dir / f"step_profile.rank{self.rank}.latest.json"
+        self.rank_current_profile_path = self.output_dir / f"step_profile.rank{self.rank}.current.json"
+        self.step_profile_path = self.output_dir / "step_profile.global.jsonl"
         self.latest_profile_path = self.output_dir / "step_profile.latest.json"
         self.current_profile_path = self.output_dir / "step_profile.current.json"
         self.trace_dir = self.output_dir / "traces"
 
         self._torch_profiler = None
         if self.enabled:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
             if self.is_rank_0:
-                self.output_dir.mkdir(parents=True, exist_ok=True)
                 self.trace_dir.mkdir(parents=True, exist_ok=True)
             self._torch_profiler = self._build_torch_profiler()
             self._torch_profiler.start()
-            if self.is_rank_0:
-                self._start_heartbeat()
+            self._start_heartbeat()
 
     @staticmethod
     def _dist_enabled() -> bool:
@@ -121,6 +125,7 @@ class StepProfileRecorder:
 
         self._cuda_sync_if_available()
         with self._state_lock:
+            self._snapshot_generation += 1
             self.current_step = int(train_step)
             self.current_episode = int(episode)
             self.current_step_start_wall = time.perf_counter()
@@ -191,9 +196,44 @@ class StepProfileRecorder:
 
         self._cuda_sync_if_available()
         with self._state_lock:
+            train_step = int(self.current_step)
+            episode = int(self.current_episode) if self.current_episode is not None else None
+            started_at = self.current_step_started_at
             total_elapsed = time.perf_counter() - self.current_step_start_wall
-            self.section_totals["step/total"] = total_elapsed
             local_sections = dict(self.section_totals)
+            local_sections["step/total"] = total_elapsed
+            self._snapshot_generation += 1
+            self.current_step = None
+            self.current_episode = None
+            self.current_step_start_wall = None
+            self.current_step_started_at = None
+            self.section_totals = {}
+            self.phase_stack = []
+            self.active_section_name = None
+            self.active_section_start_wall = None
+            self.last_section_name = None
+            self.last_section_elapsed_s = None
+
+        local_step_total_s = local_sections.get("step/total", total_elapsed)
+        local_ratios = {
+            name: (value / local_step_total_s if local_step_total_s > 0 else 0.0)
+            for name, value in local_sections.items()
+        }
+        local_record = {
+            "train_step": train_step,
+            "episode": episode,
+            "rank": self.rank,
+            "world_size": self.world_size,
+            "started_at": started_at,
+            "finished_at": time.time(),
+            "sections_local_s": local_sections,
+            "sections_local_ratio": local_ratios,
+        }
+        if extra:
+            local_record["extra"] = extra
+        self._append_jsonl(self.rank_step_profile_path, local_record)
+        self._write_atomic_json(self.rank_latest_profile_path, local_record)
+        self._write_atomic_json(self.rank_current_profile_path, local_record)
 
         gathered_sections = self._gather_sections(local_sections)
         self._torch_profiler.step()
@@ -212,10 +252,11 @@ class StepProfileRecorder:
                 for name, value in aggregated["mean_s"].items()
             }
             record = {
-                "train_step": self.current_step,
-                "episode": self.current_episode,
+                "train_step": train_step,
+                "episode": episode,
                 "world_size": self.world_size,
-                "started_at": self.current_step_started_at,
+                "available_ranks": list(range(self.world_size)),
+                "started_at": started_at,
                 "finished_at": time.time(),
                 "sections_max_s": aggregated["max_s"],
                 "sections_mean_s": aggregated["mean_s"],
@@ -229,30 +270,17 @@ class StepProfileRecorder:
             self._write_atomic_json(self.current_profile_path, record)
             result = {
                 "record": record,
-                "wandb_logs": self._build_wandb_logs(aggregated["max_s"], ratios),
+                "wandb_logs": self._build_wandb_logs(train_step, aggregated["max_s"], ratios),
                 "summary": self._build_summary(aggregated["max_s"], ratios),
             }
-
-        with self._state_lock:
-            self.current_step = None
-            self.current_episode = None
-            self.current_step_start_wall = None
-            self.current_step_started_at = None
-            self.section_totals = {}
-            self.phase_stack = []
-            self.active_section_name = None
-            self.active_section_start_wall = None
-            self.last_section_name = None
-            self.last_section_elapsed_s = None
         return result
 
     def close(self) -> None:
         if not self.enabled:
             return
-        if self.is_rank_0:
-            self._heartbeat_stop.set()
-            if self._heartbeat_thread is not None:
-                self._heartbeat_thread.join(timeout=max(self.HEARTBEAT_INTERVAL_S * 2, 2.0))
+        self._heartbeat_stop.set()
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.join(timeout=max(self.HEARTBEAT_INTERVAL_S * 2, 2.0))
         if self._torch_profiler is not None:
             self._torch_profiler.stop()
 
@@ -282,8 +310,8 @@ class StepProfileRecorder:
     def _flatten_section_name(name: str) -> str:
         return name.replace("/", "_").replace(" ", "_")
 
-    def _build_wandb_logs(self, max_s: Dict[str, float], ratios: Dict[str, float]) -> Dict[str, float]:
-        logs = {"profile/train_step": self.current_step}
+    def _build_wandb_logs(self, train_step: int, max_s: Dict[str, float], ratios: Dict[str, float]) -> Dict[str, float]:
+        logs = {"profile/train_step": train_step}
         for name, value in max_s.items():
             flat_name = self._flatten_section_name(name)
             logs[f"profile/{flat_name}_s"] = value
@@ -313,10 +341,18 @@ class StepProfileRecorder:
         snapshot = self._build_current_snapshot()
         if snapshot is None:
             return
-        self._write_atomic_json(self.current_profile_path, snapshot)
+        if not self._write_snapshot_if_current(self.rank_current_profile_path, snapshot):
+            return
+        if not self.is_rank_0:
+            return
+
+        global_snapshot = self._build_global_current_snapshot(snapshot)
+        if global_snapshot is None:
+            return
+        self._write_atomic_json(self.current_profile_path, global_snapshot)
 
     def _build_current_snapshot(self) -> Optional[Dict]:
-        if not self.enabled or not self.is_rank_0:
+        if not self.enabled:
             return None
 
         with self._state_lock:
@@ -338,12 +374,14 @@ class StepProfileRecorder:
             snapshot = {
                 "train_step": self.current_step,
                 "episode": self.current_episode,
+                "rank": self.rank,
                 "world_size": self.world_size,
                 "started_at": self.current_step_started_at,
                 "partial": True,
                 "current_elapsed_s": current_elapsed_s,
                 "sections_local_s": sections_local_s,
                 "sections_local_ratio": current_ratios,
+                "_snapshot_generation": self._snapshot_generation,
             }
             if self.last_section_name is not None:
                 snapshot["last_section"] = self.last_section_name
@@ -354,6 +392,66 @@ class StepProfileRecorder:
             if active_section_elapsed_s is not None:
                 snapshot["active_section_elapsed_s"] = active_section_elapsed_s
             return snapshot
+
+    def _build_global_current_snapshot(self, rank0_snapshot: Dict) -> Optional[Dict]:
+        current_step = rank0_snapshot.get("train_step")
+        current_episode = rank0_snapshot.get("episode")
+        if current_step is None:
+            return None
+
+        snapshots = []
+        available_ranks = []
+        active_sections = {}
+        for rank in range(self.world_size):
+            if rank == self.rank:
+                candidate = dict(rank0_snapshot)
+            else:
+                candidate = self._read_json(self.output_dir / f"step_profile.rank{rank}.current.json")
+            if not candidate:
+                continue
+            if candidate.get("train_step") != current_step or candidate.get("episode") != current_episode:
+                continue
+            snapshots.append(candidate)
+            available_ranks.append(rank)
+            active_section = candidate.get("active_section")
+            if active_section:
+                active_sections[f"rank{rank}"] = active_section
+
+        if not snapshots:
+            return None
+
+        aggregated = self._aggregate_sections([snapshot.get("sections_local_s", {}) for snapshot in snapshots])
+        elapsed_values = [float(snapshot.get("current_elapsed_s", 0.0)) for snapshot in snapshots]
+        max_elapsed = max(elapsed_values) if elapsed_values else 0.0
+        mean_elapsed = sum(elapsed_values) / len(elapsed_values) if elapsed_values else 0.0
+        max_ratios = {
+            name: (value / max_elapsed if max_elapsed > 0 else 0.0)
+            for name, value in aggregated["max_s"].items()
+        }
+        mean_ratios = {
+            name: (value / mean_elapsed if mean_elapsed > 0 else 0.0)
+            for name, value in aggregated["mean_s"].items()
+        }
+        started_at_candidates = [snapshot.get("started_at") for snapshot in snapshots if snapshot.get("started_at") is not None]
+
+        global_snapshot = {
+            "train_step": current_step,
+            "episode": current_episode,
+            "world_size": self.world_size,
+            "available_ranks": available_ranks,
+            "num_rank_snapshots": len(snapshots),
+            "started_at": min(started_at_candidates) if started_at_candidates else None,
+            "partial": True,
+            "current_elapsed_max_s": max_elapsed,
+            "current_elapsed_mean_s": mean_elapsed,
+            "sections_max_s": aggregated["max_s"],
+            "sections_mean_s": aggregated["mean_s"],
+            "sections_max_ratio": max_ratios,
+            "sections_mean_ratio": mean_ratios,
+        }
+        if active_sections:
+            global_snapshot["active_sections"] = active_sections
+        return global_snapshot
 
     def _start_heartbeat(self) -> None:
         self._heartbeat_thread = threading.Thread(
@@ -367,16 +465,39 @@ class StepProfileRecorder:
         while not self._heartbeat_stop.wait(self.HEARTBEAT_INTERVAL_S):
             self._write_current_snapshot()
 
+    def _write_snapshot_if_current(self, path: Path, payload: Dict) -> bool:
+        snapshot_generation = payload.get("_snapshot_generation")
+        if snapshot_generation is None:
+            self._write_atomic_json(path, payload)
+            return True
+
+        sanitized_payload = dict(payload)
+        sanitized_payload.pop("_snapshot_generation", None)
+        with self._write_lock:
+            with self._state_lock:
+                if snapshot_generation != self._snapshot_generation:
+                    return False
+            self._write_atomic_json_unlocked(path, sanitized_payload)
+        return True
+
+    def _append_jsonl(self, path: Path, payload: Dict) -> None:
+        with self._write_lock:
+            self._append_jsonl_unlocked(path, payload)
+
     @staticmethod
-    def _append_jsonl(path: Path, payload: Dict) -> None:
+    def _append_jsonl_unlocked(path: Path, payload: Dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
             f.flush()
             os.fsync(f.fileno())
 
+    def _write_atomic_json(self, path: Path, payload: Dict) -> None:
+        with self._write_lock:
+            self._write_atomic_json_unlocked(path, payload)
+
     @staticmethod
-    def _write_atomic_json(path: Path, payload: Dict) -> None:
+    def _write_atomic_json_unlocked(path: Path, payload: Dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_suffix(path.suffix + ".tmp")
         with tmp_path.open("w", encoding="utf-8") as f:
@@ -384,3 +505,11 @@ class StepProfileRecorder:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, path)
+
+    @staticmethod
+    def _read_json(path: Path) -> Optional[Dict]:
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return None
