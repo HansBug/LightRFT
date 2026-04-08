@@ -20,6 +20,10 @@
 - advantage estimator: `group_norm`
 - rollout engine: 当前主线使用本地 `hf`
 
+## 太长不看
+
+默认 `math_psgrpo` 不是把 PRM 的连续分数直接拿去做 GRPO loss。真实链路是：URSA-RM 先从每个 `Step N:` 边界抽 `step_scores`，再聚合出连续 `model_reward` 仅用于日志；训练真正使用的是 `final_reward`，即答错=0，答对但出现 drop-moment=0.5，答对且无 drop=1。举例：某条回答 `step_scores=[0.96,0.45,0.43]`，虽然 `model_reward≈0.43`，但因答案答对且中间骤降，训练 reward 是 0.5，不是 0.43。随后 8 条同题采样的 `final_reward` 做组内标准化，变成 GRPO advantage，再挂到 token returns 上进入 PPO clipped loss。
+
 ## 一页结论
 
 先把最重要的话说清楚：
@@ -825,4 +829,3 @@ PRM step score sequence
 如果要把 Phase 1 压成一句可以直接复述给别人的话：
 
 > 在当前 LightRFT 的默认 Stage 3 路径里，URSA-RM 先给出逐步 PRM 分数；这些分数默认不是直接当作 GRPO reward，而是先被用来检测是否出现 drop-moment，再和最终答案正确性一起压缩成 `0 / 0.5 / 1` 的 PS-GRPO reward。之后 trainer 对这组 reward 做组内标准化，生成 sequence-level 相对优势，再把它挂到 token-level returns/advantages 上，最后才送进 PPO/GRPO 的 clipped policy loss。
-
