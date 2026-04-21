@@ -589,6 +589,13 @@ def train(args):
             f"reshard_after_forward disabled, and {residency_note}."
         )
 
+        from rollout_eos_patch import install_math_prm_rollout_eos_patch
+        install_math_prm_rollout_eos_patch(rollout_actor, tokenizer, tokenizer.eos_token_id)
+        strategy.print(
+            "Installed math_prm rollout EOS patch on rollout_actor.model.generate "
+            "(only fires when structured_answer_stop batches are in flight)."
+        )
+
     strategy.print(reward_models)
 
     if ema_model:
