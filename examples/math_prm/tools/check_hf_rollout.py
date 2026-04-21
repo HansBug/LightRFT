@@ -30,7 +30,7 @@ from typing import Any
 import torch
 import torch.distributed as dist
 from PIL import Image
-from transformers.generation.logits_process import LogitsProcessorList
+from transformers.generation.stopping_criteria import StoppingCriteriaList
 
 TOOLS_DIR = Path(__file__).resolve().parent
 MATH_PRM_DIR = TOOLS_DIR.parent
@@ -41,11 +41,11 @@ for path in (TOOLS_DIR, MATH_PRM_DIR):
 from lightrft.datasets.utils import zero_pad_sequences
 from lightrft.strategy import StrategyBase
 from lightrft.strategy.fake_strategy import FakeStrategy
-from lightrft.utils.math_prm_output import should_stop_math_prm_response_text
+from math_prm_output import should_stop_math_prm_response_text
+from rollout_eos_patch import StructuredAnswerStoppingCriteria
 from train_colocate import load_actor_tokenizer_processor, prepare_ursa_runtime_for_inference_engines
-from ursa_actor import UrsaActor
+from ursa_actor import UrsaActor  # noqa: F401
 from ursa_model import UrsaForConditionalGeneration
-from lightrft.strategy.strategy_base import _StructuredAnswerEosLogitsProcessor
 
 
 SYSTEM_PROMPT = (
@@ -257,11 +257,11 @@ def direct_generate_outputs(
     attention_mask = padded_input_ids.ne(pad_token_id).long()
     prompt_lengths = attention_mask.sum(dim=1).detach().cpu()
     prompt_length = int(padded_input_ids.size(1))
-    logits_processor = None
+    stopping_criteria = None
     if sampling_params.get("structured_answer_stop", False):
-        logits_processor = LogitsProcessorList(
+        stopping_criteria = StoppingCriteriaList(
             [
-                _StructuredAnswerEosLogitsProcessor(
+                StructuredAnswerStoppingCriteria(
                     tokenizer,
                     prompt_length,
                     eos_token_id,
@@ -274,7 +274,7 @@ def direct_generate_outputs(
         "attention_mask": attention_mask,
         "pixel_values": model_inputs["pixel_values"],
         "image_grid_thw": model_inputs["image_grid_thw"],
-        "logits_processor": logits_processor,
+        "stopping_criteria": stopping_criteria,
         "do_sample": sampling_params.get("do_sample", False),
         "max_new_tokens": sampling_params.get("max_new_tokens", 256),
         "min_new_tokens": sampling_params.get("min_new_tokens", 1),

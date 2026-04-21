@@ -54,10 +54,6 @@ from lightrft.trainer.experience_maker_vl import (
 
 from lightrft.utils.remote_rm_utils import remote_rm_fn
 from lightrft.utils import Timer, get_current_device
-from lightrft.utils.math_prm_output import (
-    is_math_prm_structured_label,
-    sanitize_math_prm_response_text,
-)
 from .utils import RunningMoments, compute_clip_fraction, get_cpgd_advantages_returns, fire_sampling, vllm_ge_0130
 from .advantage_calculator import get_advantage_calculator, normalize_advantages_cross_batch
 from .image_utils import normalize_images, get_images_num
@@ -1232,9 +1228,6 @@ class FastExperienceMaker(NaiveExperienceMaker):
 
             if all_labels is not None:
                 all_labels = sum([[label] * n_samples for label in all_labels], [])
-            structured_answer_stop = bool(all_labels) and all(is_math_prm_structured_label(label) for label in all_labels)
-            if config.engine_type == "hf":
-                sampling_params["structured_answer_stop"] = structured_answer_stop
 
             if is_multimodal:
                 processed_data = self.multimodal_processor.process_multimodal_batch(
@@ -1299,8 +1292,6 @@ class FastExperienceMaker(NaiveExperienceMaker):
                 return None  # Return None, subsequent experience_maker will ignore
             else:
                 raise
-
-        all_outputs = self._sanitize_structured_math_prm_outputs(all_outputs, all_labels)
 
         with self.profiler.section("collect/generate_build_samples"):
             samples_list = []
@@ -1369,49 +1360,6 @@ class FastExperienceMaker(NaiveExperienceMaker):
         self.strategy.report_memory("after rollout engine generation")
 
         return samples_list
-
-    def _sanitize_structured_math_prm_outputs(self, outputs: List, labels: Optional[List]) -> List:
-        if not outputs or not labels:
-            return outputs
-        if not hasattr(self.tokenizer, "decode") or not hasattr(self.tokenizer, "encode"):
-            return outputs
-
-        sanitized = 0
-        trimmed_token_counts = []
-
-        for idx, label in enumerate(labels[: len(outputs)]):
-            if not is_math_prm_structured_label(label):
-                continue
-
-            original_ids = list(outputs[idx].output_token_ids)
-            if not original_ids:
-                continue
-
-            original_text = self.tokenizer.decode(original_ids, skip_special_tokens=False)
-            cleaned_text = sanitize_math_prm_response_text(original_text)
-            if cleaned_text == original_text:
-                continue
-
-            cleaned_ids = self.tokenizer.encode(cleaned_text, add_special_tokens=False)
-            if not cleaned_ids:
-                continue
-            if cleaned_ids == original_ids:
-                continue
-
-            outputs[idx].output_token_ids = cleaned_ids
-            sanitized += 1
-            trimmed_token_counts.append(len(original_ids) - len(cleaned_ids))
-
-        if sanitized:
-            mean_trim = float(np.mean(trimmed_token_counts))
-            max_trim = int(max(trimmed_token_counts))
-            self.strategy.print(
-                "[math_prm_postprocess] sanitized "
-                f"{sanitized}/{len(outputs)} outputs after first answer line; "
-                f"mean_trim_tokens={mean_trim:.1f}, max_trim_tokens={max_trim}"
-            )
-
-        return outputs
 
     def get_advantages_and_returns(
         self,

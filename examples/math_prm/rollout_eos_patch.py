@@ -3,31 +3,36 @@ Math PRM rollout EOS patch — keeps the fix local to examples/math_prm/.
 
 Background
 ----------
-LightRFT's local-HF rollout path (``engine_generate_local`` in
-``lightrft/strategy/strategy_base.py``) already installs a
-``_StructuredAnswerEosLogitsProcessor`` that *nudges* logits toward EOS once
-the response contains a fully-formed "†Answer: <answer>" line. That was the
-intent: force HF to sample EOS next step.
-
-In practice, on our 8-GPU FSDP rollout, this nudge fires hundreds of times
-(``forced_eos_rows=291`` per batch-of-4) yet generation still runs the full
-``max_new_tokens`` for basically every sample (``mean_length=511.8`` out of
-512). The logits nudge → sampled token → ``EosTokenCriteria`` feedback loop
-does not reliably terminate the HF sample loop under FSDP.
+On 8-GPU FSDP rollouts, historical attempts to terminate URSA generation
+through a ``LogitsProcessor`` that nudges the eos logit up were unreliable:
+logs showed the processor firing hundreds of times (``forced_eos_rows=291``
+per batch-of-4) while every sample still ran the full ``max_new_tokens``
+(``mean_length=511.8`` / 512). The "logits nudge → sampled token →
+``EosTokenCriteria``" handshake does not close under FSDP's numerical
+regime, and even on single card it is only probabilistic.
 
 Fix
 ---
-Add a ``StoppingCriteria`` that decides termination directly — HF's sample
-loop calls it every step and marks a sequence finished when we return True
-for that row. This bypasses the "sample eos, then notice we sampled eos"
-handshake that is failing.
+Install a ``StoppingCriteria`` directly on the rollout actor's underlying
+HF model. HF's sample loop calls ``stopping_criteria(input_ids, scores)``
+*after* each new token is appended, and ANDs the returned mask into
+``unfinished_sequences``. When we return True for a row, HF marks it
+finished immediately — no sampling, no logit tricks, no numerical edge.
 
+The criteria also exposes an ``eos_token_id`` attribute so HF's
+``has_eos_stopping_criteria`` detection (``utils.py:2735``) treats our
+signal as EOS-equivalent and enables the post-EOS pad-fill path at
+``utils.py:2835`` for rows we have marked done.
+
+Shape
+-----
 This module is self-contained under ``examples/math_prm/`` and is installed
 from ``train_colocate.py`` via ``install_math_prm_rollout_eos_patch``. The
-patch wraps ``rollout_actor.model.generate`` (the HF model's native generate)
-so it only affects math_prm runs; non-structured batches come in without the
-``_StructuredAnswerEosLogitsProcessor`` in ``logits_processor`` and the
-patch is a pure pass-through.
+install helper wraps ``rollout_actor.model.generate`` so every generate
+call gets a fresh criteria injected. Since math_prm's training loop only
+ever runs math_prm batches, unconditional injection is correct — on
+non-math content the criteria simply never sees ``†Answer:`` and its
+``done`` mask stays all-False (pure runtime no-op).
 
 No changes to ``lightrft/`` are required.
 """
@@ -42,14 +47,13 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 from transformers.generation.stopping_criteria import StoppingCriteria, StoppingCriteriaList
 
-from lightrft.strategy.strategy_base import _StructuredAnswerEosLogitsProcessor
-from lightrft.utils.math_prm_output import MATH_PRM_ANSWER_MARKER, should_stop_math_prm_response_text
+from math_prm_output import MATH_PRM_ANSWER_MARKER, should_stop_math_prm_response_text
 
 
 class StructuredAnswerStoppingCriteria(StoppingCriteria):
     """
-    Mirrors the detection logic of ``_StructuredAnswerEosLogitsProcessor`` but
-    plugs into HF's ``stopping_criteria`` API instead of the logits API.
+    Terminate URSA-math_prm rollout generation when a fully-formed
+    ``†Answer: <answer>`` line has been emitted.
 
     Key properties:
 
@@ -189,18 +193,20 @@ class StructuredAnswerStoppingCriteria(StoppingCriteria):
 
 def install_math_prm_rollout_eos_patch(rollout_actor, tokenizer, eos_token_id: int) -> None:
     """
-    Wrap ``rollout_actor.model.generate`` so that whenever LightRFT's
-    existing structured-answer LogitsProcessor is present in the kwargs
-    (which is exactly when ``fast_exp_maker`` has marked the batch as
-    ``structured_answer_stop=True``), we also inject a matching
-    ``StructuredAnswerStoppingCriteria`` into the generate call.
+    Wrap ``rollout_actor.model.generate`` so that every generate call gets a
+    fresh ``StructuredAnswerStoppingCriteria`` injected into its
+    ``stopping_criteria`` kwarg.
 
-    Idempotent: if already installed, this is a no-op.
+    This is only installed from the math_prm example's ``train_colocate.py``
+    on the dedicated rollout actor that is used exclusively for math_prm
+    batches, so unconditional injection is correct and keeps the patch
+    self-contained without any reliance on lightrft-side signals.
 
-    Pure pass-through for non-structured generate calls: the LogitsProcessor
-    match is an ``isinstance`` check against LightRFT's specific class, so
-    any future callers that build different processors won't accidentally
-    trigger our termination logic.
+    For non-math batches the criteria simply never sees ``†Answer:`` in the
+    decoded tail, so its ``done`` mask stays all-False and the patch is a
+    no-op at runtime.
+
+    Idempotent: a second install call is a no-op.
     """
     model = rollout_actor.model
     if getattr(model, "_math_prm_rollout_eos_patch_installed", False):
@@ -210,32 +216,37 @@ def install_math_prm_rollout_eos_patch(rollout_actor, tokenizer, eos_token_id: i
 
     @functools.wraps(orig_generate)
     def patched_generate(*args: Any, **kwargs: Any):
-        logits_processor = kwargs.get("logits_processor")
-        should_inject = False
-        if logits_processor is not None:
-            for proc in logits_processor:
-                if isinstance(proc, _StructuredAnswerEosLogitsProcessor):
-                    should_inject = True
-                    break
+        input_ids = kwargs.get("input_ids")
+        if input_ids is None and args:
+            input_ids = args[0]
+        if input_ids is not None and hasattr(input_ids, "size"):
+            prompt_length = int(input_ids.size(1))
+            new_criteria = StructuredAnswerStoppingCriteria(
+                tokenizer=tokenizer,
+                prompt_length=prompt_length,
+                eos_token_id=int(eos_token_id),
+            )
+            existing = kwargs.get("stopping_criteria")
+            if existing is None:
+                kwargs["stopping_criteria"] = StoppingCriteriaList([new_criteria])
+            else:
+                # Be conservative — if caller already provided criteria,
+                # prepend ours rather than dropping theirs.
+                kwargs["stopping_criteria"] = StoppingCriteriaList([new_criteria, *existing])
 
-        if should_inject:
-            input_ids = kwargs.get("input_ids")
-            if input_ids is None and args:
-                input_ids = args[0]
-            if input_ids is not None:
-                prompt_length = int(input_ids.size(1))
-                new_criteria = StructuredAnswerStoppingCriteria(
-                    tokenizer=tokenizer,
-                    prompt_length=prompt_length,
-                    eos_token_id=int(eos_token_id),
-                )
-                existing = kwargs.get("stopping_criteria")
-                if existing is None:
-                    kwargs["stopping_criteria"] = StoppingCriteriaList([new_criteria])
-                else:
-                    # Be conservative — if caller already provided criteria,
-                    # prepend ours rather than dropping theirs.
-                    kwargs["stopping_criteria"] = StoppingCriteriaList([new_criteria, *existing])
+            # HF auto-enables `synced_gpus=True` under FSDP (see
+            # generation/utils.py:2218), but each rank here runs an independent
+            # local-HF generate on its own prompt slice: reshard_after_forward
+            # is False on the rollout actor so there are no per-step
+            # collectives. Leaving synced_gpus on causes the loop to `continue`
+            # past the input_ids append at utils.py:2838 once this rank's rows
+            # are all done — combined with URSA's prefill-vs-decode branching
+            # in modeling_ursa.py:279 (takes prefill when
+            # `input_ids.shape[1] != 1`), the stale input_ids triggers an
+            # IndexError in `_merge_input_ids_with_image_features`. Force it
+            # off so each rank's generate loop exits cleanly when its own
+            # stopping criteria fire.
+            kwargs.setdefault("synced_gpus", False)
 
         return orig_generate(*args, **kwargs)
 

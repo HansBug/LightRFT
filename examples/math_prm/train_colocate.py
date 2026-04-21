@@ -593,7 +593,7 @@ def train(args):
         install_math_prm_rollout_eos_patch(rollout_actor, tokenizer, tokenizer.eos_token_id)
         strategy.print(
             "Installed math_prm rollout EOS patch on rollout_actor.model.generate "
-            "(only fires when structured_answer_stop batches are in flight)."
+            "(injects StructuredAnswerStoppingCriteria on every generate call)."
         )
 
     strategy.print(reward_models)

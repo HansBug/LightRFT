@@ -24,7 +24,7 @@ from train_colocate import resolve_reference_shard_size
 from lightrft.models.actor_vl import ActorVL
 from lightrft.strategy.strategy_base import StrategyBase
 from lightrft.trainer.fast_exp_maker import MultimodalDataProcessor
-from lightrft.utils.math_prm_output import (
+from math_prm_output import (
     is_math_prm_structured_label,
     sanitize_math_prm_response_text,
     should_stop_math_prm_response_text,
