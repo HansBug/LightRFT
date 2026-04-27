@@ -103,6 +103,8 @@ MICRO_ROLLOUT_BATCH_SIZE="${MICRO_ROLLOUT_BATCH_SIZE:-4}"
 
 # --- Optimisation ---
 KL="${KL:-0.001}"                     # URSA-MATH repo: KL coefficient.
+KL_TARGET="${KL_TARGET:-}"            # If set, enables AdaptiveKLController with this target.
+KL_HORIZON="${KL_HORIZON:-10000}"     # Horizon for adaptive KL annealing.
 LR="${LR:-1e-6}"                      # URSA-MATH repo: actor learning rate.
 PROMPT_MAX_LEN="${PROMPT_MAX_LEN:-1024}"   # URSA-MATH repo: prompt length.
 GENERATE_MAX_LEN="${GENERATE_MAX_LEN:-3072}" # URSA-MATH repo: generation length.
@@ -324,6 +326,11 @@ PY
 # use_engine for math_prm/math_psgrpo and loads via HF directly.
 REWARD_PRETRAIN_PATHS="{\"math_prm\":\"${PATH_TO_URSA_RM}\"}"
 
+KL_TARGET_ARGS=()
+if [[ -n "${KL_TARGET}" ]]; then
+    KL_TARGET_ARGS=(--kl_target "${KL_TARGET}")
+fi
+
 WANDB_ARGS=()
 WANDB_ENABLE_REASON="disabled"
 WANDB_USE_WANDB_ARG=""
@@ -472,6 +479,7 @@ python -m torch.distributed.run \
     --use_kl_loss \
     --init_kl_coef $KL \
     --kl_estimator "k3" \
+    "${KL_TARGET_ARGS[@]}" \
     --prompt_data "${PATH_TO_YOUR_MATH_DATASET}" \
     --max_samples ${MAX_SAMPLES} \
     --input_key "prompt" \
